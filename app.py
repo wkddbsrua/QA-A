@@ -217,7 +217,8 @@ class App(tk.Tk):
         # 이 PC 기준으로 크기를 박지 않는다 - 실제 화면에 맞춰 잡고 가운데 놓는다.
         self.ui_font = pick_font(self, ['맑은 고딕', 'Malgun Gothic', 'Segoe UI', 'Noto Sans KR'])
         self.mono_font = pick_font(self, ['Consolas', 'D2Coding', 'Courier New'])
-        self._fit_window(980, 660, 820, 520)
+        # 아래 버튼 줄(결과 폴더~클립보드 복사 7개 + 개수) 이 125% 배율 PC 에서 980 으로는 잘렸다.
+        self._fit_window(1180, 700, 1000, 520)
 
         # ★작업 스레드는 tkinter 를 직접 만지지 않는다.
         #   after() 조차 다른 스레드에서 부르면 "main thread is not in main loop" 로
@@ -1476,7 +1477,7 @@ class App(tk.Tk):
         win.configure(bg='#ffffff')
         win.transient(self)
         win.grab_set()
-        win.geometry('940x760')
+        win.geometry('1100x760')
 
         tk.Label(win, bg='#ffffff', font=(f, 11, 'bold'), anchor='w',
                  text='보내기 전에 확인하세요' if live else '지난 회차 문서 (읽기 전용 회차)'
@@ -1498,7 +1499,7 @@ class App(tk.Tk):
                 cap_rows.append('화면 %d 캡처 없음' % t['screen'])
         if cap_rows:
             tk.Label(caps, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
-                     wraplength=880,
+                     wraplength=1040,
                      text='화면 캡처: ' + ' · '.join(cap_rows)
                           + ('   (없는 화면은 목록의 주소를 눌러 열고 [캡처 갱신])' if live else '')
                      ).pack(side='left')
@@ -1791,7 +1792,7 @@ class App(tk.Tk):
         win.configure(bg='#ffffff')
         win.transient(parent)
         win.grab_set()
-        win.geometry('560x440')
+        win.geometry('640x500')
         tk.Label(win, bg='#ffffff', font=(f, 11, 'bold'), anchor='w',
                  text='%s  ·  %s' % (cfg.site, cfg.email)).pack(fill='x', padx=16, pady=(14, 6))
         mode = tk.StringVar(value=self.settings.get('jira_mode') or 'comment')
@@ -1874,7 +1875,56 @@ class App(tk.Tk):
         type_box.bind('<<ComboboxSelected>>', refresh_types)
         tk.Radiobutton(win, text='기존 이슈에 댓글 달기', value='comment', variable=mode, bg='#ffffff',
                        font=(f, 10, 'bold'), anchor='w').pack(fill='x', padx=16, pady=(10, 0))
-        row('이슈 키', key)
+        issue_box = row('이슈', key, combo=True)
+        issue_hint = tk.StringVar(value='')
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left', wraplength=500,
+                 textvariable=issue_hint).pack(fill='x', padx=32)
+
+        # 1.2: 이슈도 목록에서 고른다 - 위에서 고른 프로젝트의 최근 갱신 이슈 50개('키  제목').
+        #   프로젝트가 없으면 내가 만들었거나 맡았거나 지켜보는 최근 이슈. 키를 직접 쳐도 된다.
+        issues = {'pk': None, 'list': []}
+
+        def fill_issues(pk, items, err):
+            if pk != issues['pk']:
+                return                          # 그 사이 프로젝트가 바뀌었다 - 늦게 온 답은 버린다
+            if err:
+                issue_hint.set('이슈 목록을 받지 못했습니다(%s) - 키를 직접 입력하세요.' % err)
+                return
+            issues['list'] = items or []
+            issue_box['values'] = ['%s  %s' % (d['key'], d['summary']) for d in issues['list']]
+            cur = project_key_of(key.get())
+            for d in issues['list']:
+                if d['key'] == cur:
+                    key.set('%s  %s' % (d['key'], d['summary']))
+                    break
+            where = ('%s 의 최근 이슈' % pk) if pk else '내 최근 이슈'
+            issue_hint.set('%s %d개 - 목록에서 고르거나 키를 직접 입력' % (where, len(issues['list'])))
+
+        def load_issues(*_a):
+            pk = project_key_of(proj.get()) or None
+            if pk == issues['pk'] and issues['list']:
+                return
+            issues['pk'] = pk
+            issue_hint.set('이슈 목록을 받는 중…')
+
+            def work():
+                items, err = None, None
+                try:
+                    items = cfg.client().recent_issues(pk)
+                except Exception as e:
+                    err = str(e)
+                self._msgq.put(('call', lambda: fill_issues(pk, items, err)))
+            threading.Thread(target=work, daemon=True).start()
+
+        def on_issue_pick(*_a):
+            cur = project_key_of(key.get())
+            for d in issues['list']:
+                if d['key'] == cur:
+                    issue_hint.set('%s · %s · %s' % (d['key'], d['status'], d['summary']))
+                    return
+        issue_box.bind('<<ComboboxSelected>>', on_issue_pick)
+        proj_box.bind('<<ComboboxSelected>>', load_issues, add='+')
+        load_issues()
         tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
                  text='파일 %d개를 함께 올립니다(그림·동영상·화면 캡처). 본문은 Jira 위키 형식으로 옮겨 올립니다.'
                       % len(files or [])).pack(fill='x', padx=16, pady=(12, 0))
@@ -1888,8 +1938,9 @@ class App(tk.Tk):
             if m == 'new' and not (pk and itype.get().strip()):
                 messagebox.showinfo('입력 필요', '프로젝트와 이슈 유형을 고르세요.', parent=win)
                 return
-            if m == 'comment' and not key.get().strip():
-                messagebox.showinfo('입력 필요', '이슈 키(예: SC-123)를 넣으세요.', parent=win)
+            issue_key = project_key_of(key.get()).upper()
+            if m == 'comment' and not issue_key:
+                messagebox.showinfo('입력 필요', '이슈를 고르거나 키(예: SC-123)를 넣으세요.', parent=win)
                 return
             self.settings['jira_mode'] = m
             cfg.project, cfg.issue_type = pk, itype.get().strip()
@@ -1901,7 +1952,7 @@ class App(tk.Tk):
             status.set('보내는 중… (창을 닫지 마세요)')
             args = dict(mode=m, md_text=text, files=list(files or []),
                         project=pk, issue_type=itype.get().strip(),
-                        issue_key=key.get().strip(), summary=summary.get().strip())
+                        issue_key=issue_key, summary=summary.get().strip())
 
             def work():
                 res, err = None, None
@@ -1960,11 +2011,13 @@ class App(tk.Tk):
         win.configure(bg='#ffffff')
         win.transient(self)
         win.grab_set()
-        win.geometry('600x460')
+        win.geometry('680x500')
         tk.Label(win, bg='#ffffff', font=(f, 11, 'bold'), anchor='w',
                  text='Jira Cloud 에 내 계정으로 올리기 위한 설정').pack(fill='x', padx=16, pady=(14, 2))
         tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
                  text='API 토큰은 한 번만 만들어 넣으면 됩니다(아래 버튼 → [API 토큰 만들기] → 복사 → 붙여넣기).\n'
+                      '★토큰은 발급 직후 한 번만 보이고 Atlassian 에서도 다시 볼 수 없습니다. 다른 PC 에서 쓰거나\n'
+                      '   다시 설치할 때 필요하니 비밀번호 관리 도구 등 안전한 곳에 따로 적어 두세요(잃으면 새로 발급).\n'
                       '토큰은 이 PC 의 내 Windows 계정에서만 풀리게 암호화해 저장합니다(다른 PC 로 복사해도 못 씁니다).\n'
                       '토큰이 없는 사람은 기존처럼 [이슈에 올리기 (등록은 직접)] 을 쓰면 됩니다.'
                  ).pack(fill='x', padx=16)

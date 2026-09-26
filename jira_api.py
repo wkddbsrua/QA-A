@@ -375,6 +375,27 @@ class JiraClient(object):
         out.sort(key=lambda d: d['key'] or u'')
         return out
 
+    def search(self, jql, max_results=50):
+        """JQL 로 이슈 목록. [{'key', 'summary', 'status'}] (보내기 창의 '기존 이슈' 목록용).
+
+        ★/rest/api/2/search 는 2025 년에 내려갔다 - /search/jql 을 쓴다(nextPageToken 방식, 첫 페이지만)."""
+        q = urllib.parse.urlencode({'jql': jql, 'fields': 'summary,status', 'maxResults': int(max_results)})
+        _s, r = self._request('GET', '/rest/api/2/search/jql?' + q)
+        out = []
+        for it in (r.get('issues') or []):
+            f = it.get('fields') or {}
+            out.append({'key': it.get('key'), 'summary': (f.get('summary') or u'').strip(),
+                        'status': ((f.get('status') or {}).get('name') or u'')})
+        return out
+
+    def recent_issues(self, project_key=None, max_results=50):
+        """프로젝트를 주면 그 프로젝트의 최근 갱신 이슈, 없으면 내가 만들었거나 맡았거나 지켜보는 최근 이슈."""
+        if project_key:
+            jql = u'project = "%s" ORDER BY updated DESC' % project_key.replace('"', '')
+        else:
+            jql = u'(reporter = currentUser() OR assignee = currentUser() OR watcher = currentUser()) ORDER BY updated DESC'
+        return self.search(jql, max_results)
+
     # ── 쓰기 ──
     def create_issue(self, project_key, issue_type, summary, description):
         body = {'fields': {'project': {'key': project_key}, 'issuetype': {'name': issue_type},
