@@ -67,6 +67,24 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         return false;
     }
 
+    /* 우리가 들여다볼 수 없는(교차출처) 큰 iframe. 그 안은 그 문서에 뜬 툴바가 담당한다 -
+     * "이 문서에서 무엇을 고를 수 있나" 를 말할 때 이것을 빼면 거짓말이 된다. */
+    function foreignFrameExists() {
+        try {
+            var area = window.innerWidth * window.innerHeight;
+            if (!area) return false;
+            var frames = document.querySelectorAll('iframe');
+            for (var i = 0; i < frames.length; i++) {
+                var seen = true;
+                try { seen = !!frames[i].contentDocument; } catch (e) { seen = false; }
+                if (seen) continue;                     // 같은 출처는 위에서 판단했다
+                var r = frames[i].getBoundingClientRect();
+                if (r.width * r.height >= area * SHARE) return true;
+            }
+        } catch (e) { /* 무시 */ }
+        return false;
+    }
+
     function parentArea() {
         // 같은 출처 부모의 화면 크기. 교차출처면 null(판단 불가 → 내가 띄운다).
         try {
@@ -94,6 +112,67 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         var pa = parentArea();
         if (pa && (window.innerWidth * window.innerHeight) < pa * SHARE) return false;
         return !dominantFrameExists();                      // 중첩 셸까지 재귀적으로 성립
+    }
+
+    /* ── 요소 속성 ──────────────────────────────────────────────
+     * ★서버가 요소에 실어 보낸 값(data-*·title·href…)이다. 화면에 무엇이 "표시되는가" 와
+     *   달리 무엇이 "와 있는가" 를 말해 주므로, 화면 탓인지 서버 탓인지가 여기서 갈린다.
+     *   (실측: DOM Tree 가 콘텐츠명 대신 영역라벨만 보이던 건 - 값이 안 온 것인지,
+     *    와 있는데 표시 우선순위가 가린 것인지를 결과 문서만으로는 가릴 수 없었다.) */
+    var lastPick = null;                // 마지막으로 더블클릭해 고른 요소
+    var SKIP_ATTRS = { 'class': 1, 'style': 1 };    // 이미 따로 나가는 것
+
+    function classKey(el) {
+        try { return Array.prototype.slice.call(el.classList).join(', '); }
+        catch (e) { return ''; }
+    }
+
+    function attrsOf(el) {
+        var out = [];
+        try {
+            var list = el.attributes || [];
+            for (var i = 0; i < list.length && out.length < 8; i++) {
+                var name = list[i].name;
+                if (SKIP_ATTRS[name]) continue;
+                var v = String(list[i].value || '');
+                if (v.length > 60) v = v.slice(0, 60) + '…';
+                out.push(v ? name + '="' + v + '"' : name);
+            }
+        } catch (e) { return ''; }
+        return out.join(' ');
+    }
+
+    /* 주석이 가리키는 요소를 되찾는다. ★못 찾으면 붙이지 않는다 -
+     * 엉뚱한 요소의 속성을 붙이는 것은 아무것도 안 붙이는 것보다 나쁘다. */
+    function pickFor(a) {
+        var want = a && a.cssClasses, el = lastPick;
+        for (var i = 0; el && i < 6; i++) {         // 고른 지점에서 위로 훑는다
+            if (classKey(el) === want) return el;   //   (agentation 이 조상을 고를 수 있다)
+            el = el.parentElement;
+        }
+        try {
+            var hit = document.querySelectorAll(a.elementPath);
+            if (hit.length === 1) return hit[0];    // 경로가 유일할 때만 믿는다
+        } catch (e) { /* 경로가 선택자로 성립하지 않는 경우 */ }
+        return null;
+    }
+
+    function withAttrs(kind, annotations) {
+        var src = annotations || [];
+        if (kind === 'delete' || kind === 'clear') return src;   // 사라진 요소는 찾지 않는다
+        var out = [];
+        for (var i = 0; i < src.length; i++) {
+            var a = src[i], el = null, at = '';
+            try { el = pickFor(a); at = el ? attrsOf(el) : ''; } catch (e) { at = ''; }
+            if (!at) { out.push(a); continue; }
+            var copy = {};                          // agentation 의 객체는 건드리지 않는다
+            for (var k in a) {
+                if (Object.prototype.hasOwnProperty.call(a, k)) copy[k] = a[k];
+            }
+            copy.attrs = at;
+            out.push(copy);
+        }
+        return out;
     }
 
     /* ── 프로그램으로 보내기 ─────────────────────────────────── */
@@ -126,7 +205,7 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
             })(),
             ts: new Date().toISOString(),
             output: output || '',
-            annotations: annotations || []
+            annotations: withAttrs(kind, annotations)
         };
         try {
             // CDP Runtime.addBinding 으로 프로그램이 만들어 둔 함수. 네트워크를 쓰지 않는다.
@@ -157,6 +236,8 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         if (host && host.parentNode) host.parentNode.removeChild(host);
         var badge = document.getElementById(BADGE_ID);
         if (badge && badge.parentNode) badge.parentNode.removeChild(badge);
+        var mode = document.getElementById(MODE_ID);
+        if (mode && mode.parentNode) mode.parentNode.removeChild(mode);
         var frame = document.getElementById(TOP_ID);
         if (frame) {
             try { frame.hidePopover(); } catch (e) { /* 무시 */ }
@@ -466,6 +547,7 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
             function (type) {
                 document.addEventListener(type, function (e) {
                     if (!mounted() || !modeOn() || isOurs(e.target)) return;
+                    if (type === 'dblclick') lastPick = e.target;    // 속성 수집용
                     e.stopPropagation();        // agentation 은 받고 페이지는 못 받는다
                 }, true);
             });
@@ -586,6 +668,62 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         } catch (e) { /* 무시 */ }
     }
 
+    /* ── [브10] 지금 어느 모드인가 ─────────────────
+     * 요구: "내가 지금 정확히 어느 모드인지 툴바에서 알 수 있게".
+     * 툴바 위치(자동 / 최상위 고정)에 따라 고를 수 있는 범위가 갈리는데, 화면에는 그
+     * 단서가 하나도 없었다. 그래서 "gnb·lnb 만 잡히고 나머지는 안 잡힌다" 는 보고가
+     * 고장인지 모드인지 사람도 프로그램도 가릴 수 없었다(프로그램의 주입 배지는
+     * 프레임 하나만 떠 있어도 초록이라 이 둘을 구분하지 못한다).
+     * ★버튼이 아니다 - 누를 수 없는 표시다(pointer-events:none). 툴바를 늘리지 않는다.
+     * ★모드가 꺼진 동안은 한 줄로 접는다 - 평소 보는 화면에 큰 배지를 올려놓지 않는다.
+     */
+    var MODE_ID = '__qa_mode_badge';
+
+    function modeBadgeText() {
+        var top = window.top === window.self;
+        var head = (forceTop() ? '최상위 고정' : '자동') + ' · ' +
+            (top ? '최상위 문서' : 'iframe 문서');
+        try { if (window.__qaVer) head += ' · ' + window.__qaVer; } catch (e) { /* 판 모름 */ }
+        if (!modeOn()) return head;                     // 접힌 상태 - 한 줄만
+        var can;
+        if (!top) {
+            can = '이 iframe 안쪽을 고를 수 있습니다 (상단바·좌측 메뉴는 불가)';
+        } else if (dominantFrameExists()) {
+            // 최상위에 툴바가 있는데 같은 출처 콘텐츠 iframe 이 있다 = 최상위 고정 모드
+            can = '상단바·좌측 메뉴를 고를 수 있습니다 (iframe 안쪽은 불가)';
+        } else if (foreignFrameExists()) {
+            can = '이 문서를 고를 수 있습니다 (다른 출처 iframe 안쪽은 그 안의 툴바로)';
+        } else {
+            can = '이 화면 전부를 고를 수 있습니다';
+        }
+        return head + '\n' + can;
+    }
+
+    function showModeBadge() {
+        try {
+            if (!isMine()) return;
+            var el = document.getElementById(MODE_ID);
+            if (!mounted()) {
+                if (el && el.parentNode) el.parentNode.removeChild(el);
+                return;
+            }
+            var frame = topFrame();
+            if (!el) {
+                el = document.createElement('div');
+                el.id = MODE_ID;
+                // 툴바 바로 위. '레이아웃 변경' 배지 자리(4.6rem)는 그대로 둔다.
+                el.style.cssText = 'position:fixed;right:1.25rem;bottom:7.2rem;' +
+                    'padding:5px 11px;border-radius:10px;background:rgba(17,17,17,.88);' +
+                    'color:#fff;font:600 11px/1.45 "Malgun Gothic",system-ui,sans-serif;' +
+                    'box-shadow:0 2px 8px rgba(0,0,0,.28);pointer-events:none;' +
+                    'white-space:pre;text-align:right;';
+            }
+            if (el.parentNode !== frame) frame.appendChild(el);
+            var text = modeBadgeText();
+            if (el.textContent !== text) el.textContent = text;
+        } catch (e) { /* 배지 하나 때문에 도구가 서면 안 된다 */ }
+    }
+
     /* ── 화면 정보 통지 · 감시 ───────────────────────────────── */
     var resizeTimer = null;
 
@@ -619,6 +757,7 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
                 else {
                     keepOnTop();             // 모달이 열렸다 닫혔을 수 있다
                     showMovedBadge();        // 레이아웃 변경 개수(브9)
+                    showModeBadge();         // 지금 어느 모드인가
                 }
             } else {
                 mount();

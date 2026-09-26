@@ -23,6 +23,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import launcher as L
+import version as VER
 from store import Store, PRIORITIES, PRIORITY_LABEL
 
 APP_NAME = '화면 주석 QA'
@@ -224,6 +225,11 @@ class App(tk.Tk):
         self._foot()
 
         self._drain()
+        # ★설정은 눌러붙는다(toolbar_top). 켜 둔 것을 잊으면 "gnb·lnb 만 잡힌다" 가
+        #   고장으로 읽힌다 - 그래서 켤 때만이 아니라 시작할 때마다 적는다.
+        self.log('판 %s · 툴바 위치: %s'
+                 % (VER.label(),
+                    '최상위 화면 고정' if self.force_top.get() else '자동'))
         pages, total = self.store.replay()
         if total:
             self.log('지난 기록을 복원했습니다 - 화면 %d개 · 주석 %d건' % (pages, total))
@@ -298,6 +304,10 @@ class App(tk.Tk):
         head = ttk.Frame(self, padding=(18, 16, 18, 4))
         head.pack(fill='x')
         ttk.Label(head, text=APP_NAME, style='H1.TLabel').pack(side='left')
+        # 판 번호. ★창 제목에는 넣지 않는다 - focus_existing_window() 가 제목으로
+        #   창을 찾으므로(FindWindowW) 제목이 바뀌면 두 번째 실행이 창을 못 찾는다.
+        ttk.Label(head, text=VER.label(), style='Muted.TLabel'
+                  ).pack(side='left', padx=(7, 0), pady=(6, 0))
         ttk.Label(head, text='  화면을 클릭해 남긴 지적을 셀렉터·좌표가 붙은 데이터로 넘긴다',
                   style='Muted.TLabel').pack(side='left', pady=(5, 0))
         self.badge = tk.Label(head, textvariable=self.status_text, bg='#e6e6e6', fg='#555555',
@@ -471,6 +481,7 @@ class App(tk.Tk):
         # 그러지 않으면 브라우저를 띄울 때마다 옛 마커가 다시 보인다.
         self.launcher.clear_stale = (self.store.counts()[1] == 0)
         self.launcher.force_top = bool(self.force_top.get())
+        self.launcher.version = VER.label()
         self._starting = True
 
         def run():
@@ -1055,6 +1066,16 @@ class App(tk.Tk):
                             '화면 %d개 · 주석 %d건을 클립보드에 담았습니다.\n'
                             '메일·메신저·이슈에 그대로 붙여넣으세요.' % (pages, total))
 
+    def next_export_name(self):
+        """추출 파일 이름 - 날짜·시각에 회차를 붙인다.
+
+        ★같은 이름으로 덮어쓰면 "어느 것이 최신인가" 를 파일 이름만으로 가릴 수 없다.
+          회차는 설정에 남겨 계속 올라간다(같은 분에 두 번 뽑아도 겹치지 않는다).
+          도구 판 번호는 파일 이름이 아니라 문서 머리에 적는다 - 받는 사람이 읽을
+          자리는 문서 안이고, 이름에 번호가 둘이면 그게 더 헷갈린다."""
+        seq = int(self.settings.get('export_seq') or 0) + 1
+        return '화면주석_%s_%03d.md' % (datetime.now().strftime('%Y%m%d-%H%M'), seq)
+
     def do_export(self):
         pages, total = self.store.counts()
         if not total:
@@ -1063,7 +1084,7 @@ class App(tk.Tk):
         text = self.preview_text('저장 전 확인', '저장')
         if text is None:
             return
-        default = '화면주석-%s.md' % datetime.now().strftime('%Y%m%d-%H%M')
+        default = self.next_export_name()
         path = filedialog.asksaveasfilename(
             title='어디에 저장할까요?', initialfile=default,
             defaultextension='.md', filetypes=[('마크다운', '*.md'), ('모든 파일', '*.*')])
@@ -1075,6 +1096,9 @@ class App(tk.Tk):
             # 저장이 실패하면 목록을 지우지 않는다(잃는 것보다 중복이 낫다).
             messagebox.showerror('저장 실패', '%s\n\n목록은 그대로 두었습니다.' % e)
             return
+        # 성공했을 때만 회차를 올린다(실패한 저장은 번호를 먹지 않는다).
+        self.settings['export_seq'] = int(self.settings.get('export_seq') or 0) + 1
+        self.save_settings()
         self._tree_sig = None
         n = self.clear_browser_side()
         self.log('추출 완료 - %s (화면 %d개 · 주석 %d건). 목록을 비웠습니다%s.'

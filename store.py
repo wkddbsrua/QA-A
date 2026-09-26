@@ -19,10 +19,14 @@ import json
 import os
 import re
 import threading
+
+import version as VER
 from collections import OrderedDict
 from datetime import datetime
 
 NOISE_CAP = 50          # 화면당 콘솔 에러·실패 요청 보관 상한(그 이상은 오래된 것부터 버린다)
+API_CAP = 20            # 화면당 '작은 응답' 보관 상한. 실패 기록과 별도 목록이어야 한다
+                        #   - 한 목록에 담으면 성공 기록이 실패 기록을 밀어내 버린다
 
 
 def _now():
@@ -73,27 +77,79 @@ def _color_basis(p):
 
 
 # 배치를 읽는 데 쓰는 속성. '안쪽으로 옮겨 달라' 류의 지적은 이 값들로 판단한다.
-LAYOUT_KEYS = ('display', 'position', 'flex-direction', 'justify-content', 'align-items',
-               'gap', 'padding', 'margin', 'width', 'height', 'text-align',
+# ★z-index·visibility·opacity·overflow 는 '안 보여요' 류 지적의 답이라 함께 본다.
+LAYOUT_KEYS = ('display', 'position', 'z-index', 'visibility', 'opacity', 'overflow',
+               'flex-direction', 'justify-content', 'align-items',
+               'gap', 'padding', 'margin', 'width', 'height',
+               'border', 'border-radius', 'text-align',
                'grid-template-columns', 'float', 'top', 'left', 'right', 'bottom')
 
+# 기본값이면 줄만 길어지고 읽히지 않는다. 기본과 다를 때만 낸다.
+#   ★실측: 주석 6건 전부에 'flex-direction: row' 와 'text-align: start' 가 붙어 있었다.
+#     둘 다 기본값이라 아무것도 말해 주지 않으면서 줄의 절반을 먹었다.
+LAYOUT_DEFAULTS = {'position': 'static', 'z-index': 'auto', 'visibility': 'visible',
+                   'opacity': '1', 'overflow': 'visible', 'float': 'none',
+                   'flex-direction': 'row', 'justify-content': 'normal',
+                   'align-items': 'normal', 'gap': 'normal', 'padding': '0px',
+                   'margin': '0px', 'border-radius': '0px', 'text-align': 'start'}
 
-def _layout_bits(styles):
-    """computedStyles 에서 배치 관련 속성만 앞으로 뽑는다.
+# 색 기준. '그림을 보내 달라' 대신 글로 답하는 자리다(README).
+COLOR_KEYS = ('color', 'background-color', 'border-color', 'outline-color')
 
-    ★스타일 줄은 300자에서 자른다. 그런데 정작 필요한 padding·gap·정렬 값이 뒤쪽에 있어
-      잘려 나갔다(실측: font-family 목록이 길어 그 뒤가 전부 사라진다)."""
+# 글자. font-family 는 목록이 길어 맨 앞 하나만 남긴다.
+TEXT_KEYS = ('font-size', 'font-weight', 'line-height', 'font-family')
+
+
+def _style_map(styles):
+    """computedStyles 문자열을 {속성: 값} 으로. 먼저 나온 선언을 남긴다."""
     got = {}
     for decl in str(styles or '').split(';'):
         if ':' not in decl:
             continue
         k, v = decl.split(':', 1)
         k, v = k.strip(), v.strip()
-        if k in LAYOUT_KEYS and v:
-            got[k] = v
+        if k and v:
+            got.setdefault(k, v)
+    return got
+
+
+def _layout_bits(styles):
+    """computedStyles 에서 배치 관련 속성만 앞으로 뽑는다.
+
+    ★예전에는 스타일 줄을 300자에서 통째로 잘랐다. 그런데 정작 필요한 padding·gap·정렬
+      값이 뒤쪽에 있어 잘려 나갔다(실측: font-family 목록이 길어 그 뒤가 전부 사라진다)."""
+    got = _style_map(styles)
     # 원본 선언 순서가 아니라 LAYOUT_KEYS 순서로 낸다 - 줄이 매번 같은 모양이어야
     # 사람이 훑어 읽는다(display 다음에 여백·정렬, 크기는 뒤).
-    return [u'%s: %s' % (k, got[k]) for k in LAYOUT_KEYS if k in got]
+    out = []
+    for k in LAYOUT_KEYS:
+        v = got.get(k)
+        if not v or v == LAYOUT_DEFAULTS.get(k):
+            continue
+        if k == 'border' and v.startswith('0px none'):
+            continue                            # 테두리 없음. 색만 붙어 있어 기본값 비교가 안 된다
+        out.append(u'%s: %s' % (k, v))
+    return out
+
+
+def _color_bits(styles):
+    """색 기준. 지적이 색이면 받는 쪽은 이 값만 있으면 된다."""
+    got = _style_map(styles)
+    return [u'%s: %s' % (k, got[k]) for k in COLOR_KEYS if got.get(k)]
+
+
+def _text_bits(styles):
+    """글자. font-family 는 첫 글꼴만 - 목록 전체는 읽히지 않고 줄만 먹는다."""
+    got = _style_map(styles)
+    out = []
+    for k in TEXT_KEYS:
+        v = got.get(k)
+        if not v:
+            continue
+        if k == 'font-family':
+            v = v.split(',')[0].strip().strip('"').strip("'")
+        out.append(u'%s: %s' % (k, v))
+    return out
 
 
 def _nums(boxes, key):
@@ -177,6 +233,62 @@ def _page_id(url):
         return (url or '').split('?')[0].split('#')[0]
 
 
+def _spot_url(url):
+    """재지적 대조용 주소. 질의문자열만 뗀다.
+
+    ★_page_id 와 달리 해시를 남긴다. SPA 에서는 해시가 화면 구분이라
+      (`#!page-edit/537`), 떼면 서로 다른 화면이 한 자리로 합쳐져 오탐이 된다."""
+    try:
+        from urllib.parse import urlsplit
+        u = urlsplit(url or '')
+        frag = ('#' + u.fragment) if u.fragment else ''
+        return '%s://%s%s%s' % (u.scheme, u.netloc, u.path, frag)
+    except Exception:
+        return (url or '').split('?')[0]
+
+
+def _round_label(name):
+    """'20260821-114544-annotations.jsonl' -> '2026-08-21 11:45'"""
+    m = re.match(r'(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})', name or '')
+    if not m:
+        return (name or '').split('-')[0]
+    return u'%s-%s-%s %s:%s' % m.groups()
+
+
+def _spots_of(path):
+    """회차 파일 하나가 남긴 (주소, 경로) 자리들. 나중에 지운 주석은 빼고 센다."""
+    alive = OrderedDict()                       # id -> (주소, 경로)
+    try:
+        with io.open(path, encoding='utf-8') as f:
+            raw = [l for l in f if l.strip()]
+    except Exception:
+        return []
+    for line in raw:
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if not rec or rec.get('t') != 'annotation':
+            continue
+        pl = rec.get('payload') or {}
+        anns = pl.get('annotations') or []
+        kind = pl.get('kind')
+        if kind == 'delete':
+            for a in anns:
+                alive.pop(a.get('id'), None)
+        elif kind == 'clear':
+            pid = _page_id(pl.get('url'))
+            for aid in [k for k, v in alive.items() if _page_id(v[0]) == pid]:
+                alive.pop(aid, None)
+        else:
+            url = _spot_url(pl.get('url'))
+            for a in anns:
+                path_sel = a.get('elementPath')
+                if a.get('id') and path_sel:
+                    alive[a['id']] = (url, path_sel)
+    return list(alive.values())
+
+
 class Store(object):
     def __init__(self, out_dir):
         self.out_dir = out_dir
@@ -197,6 +309,13 @@ class Store(object):
         # 사람이 정한 주석 순서. key -> [aid…] (없으면 들어온 순서)
         self.order = {}
         self._replaying = False
+        self._spots = None      # 지난 회차 자리 색인. 첫 렌더 때 한 번만 읽는다.
+        # 해상도를 알기 전('?') 키에서 실제 키로 옮겨 간 자취.
+        #   ★응답 본문은 요청이 끝난 뒤 작업 큐를 거쳐 늦게 도착한다. 그 사이에
+        #     merge_unknown 이 화면 키를 바꾸면, 늦게 온 기록이 은퇴한 키를 들고 와
+        #     조용히 버려지고 '해상도 미상' 유령 화면까지 생긴다(실측: 400 본문이
+        #     붙는 판과 안 붙는 판이 갈렸다 - 경합이었다).
+        self.moved = {}
 
     # ── 화면 ──────────────────────────────────────────────────
     @staticmethod
@@ -283,7 +402,7 @@ class Store(object):
                 'bg': '', 'scheme': '', 'prefers_dark': None,
                 'first_seen': _now(), 'last_seen': _now(),
                 'annotations': OrderedDict(),   # id -> annotation
-                'console': [], 'network': [],
+                'console': [], 'network': [], 'api': [],
             }
             self.pages[key] = p
         return p
@@ -325,6 +444,9 @@ class Store(object):
             new = self._page(dst)
             new['console'] = (old['console'] + new['console'])[-NOISE_CAP:]
             new['network'] = (old['network'] + new['network'])[-NOISE_CAP:]
+            # ★이걸 빼면 안 된다. 화면 진입 직후의 조회는 해상도를 알기 전에 도착하므로
+            #   여기서 옮기지 않으면 '목록이 비었다' 의 근거가 통째로 사라진다.
+            new['api'] = ((old.get('api') or []) + new['api'])[-API_CAP:]
             for aid, a in old['annotations'].items():
                 new['annotations'].setdefault(aid, a)
             for k in ('title', 'dpr', 'referrer'):
@@ -332,6 +454,7 @@ class Store(object):
                     new[k] = old[k]
             new['first_seen'] = min(new['first_seen'], old['first_seen'])
             self.pages.pop(src, None)
+            self.moved[src] = dst
             # ★병합 사실을 기록에 남긴다. 안 남기면 재시작 복원(replay) 때
             #   '해상도 미상' 화면이 한 줄 더 살아나 라이브와 결과가 달라진다(실측).
             if not self._replaying:
@@ -380,19 +503,101 @@ class Store(object):
                 self._append_jsonl({'t': 'console', 'url': p['url'],
                                     'viewport': p['viewport'], 'level': level, 'text': text})
 
-    def add_network(self, key, request_url, status, reason=''):
+    def add_network(self, key, request_url, status, reason='', token=''):
         with self.lock:
             p = self._page(key)
             p['network'].append({'ts': _now(), 'request': request_url,
-                                 'status': status, 'reason': reason})
+                                 'status': status, 'reason': reason,
+                                 'token': token, 'body': ''})
             del p['network'][:-NOISE_CAP]
             if not self._replaying:
                 self._append_jsonl({'t': 'network', 'url': p['url'], 'viewport': p['viewport'],
-                                    'request': request_url, 'status': status, 'reason': reason})
+                                    'request': request_url, 'status': status,
+                                    'reason': reason, 'token': token})
+
+    def set_network_body(self, key, token, body):
+        """실패 요청 기록에 응답 본문을 붙인다(token = CDP requestId).
+
+        ★상태코드만으로는 받는 쪽이 원인을 못 읽는다. 서버가 400 에 적어 보낸 사유
+          ("이미 콘텐츠가 배치된 영역입니다") 가 본문에 있고, 그게 없으면 되묻게 된다.
+        ★목록 위치가 아니라 token 으로 찾는다. NOISE_CAP 으로 앞이 잘리거나 되돌리기로
+          줄이 빠져도 엉뚱한 기록에 붙지 않아야 한다."""
+        if not token or not body:
+            return
+        with self.lock:
+            p = self._page(self._live_key(key))
+            for rec in reversed(p['network']):
+                if rec.get('token') == token:
+                    if rec.get('body'):
+                        return                  # 이미 붙었다(재생 중 중복 호출)
+                    rec['body'] = body
+                    break
+            else:
+                return
+            if not self._replaying:
+                self._append_jsonl({'t': 'netbody', 'url': p['url'],
+                                    'viewport': p['viewport'], 'token': token, 'body': body})
+
+    def _live_key(self, key):
+        """늦게 도착한 기록의 화면 키를 지금 살아 있는 키로 옮긴다(merge_unknown 자취)."""
+        seen = 0
+        while key in self.moved and seen < 5:       # 해상도가 두 번 바뀐 경우까지
+            key = self.moved[key]
+            seen += 1
+        return key
+
+    def add_api(self, key, request_url, status, body):
+        """성공했지만 응답이 작은 조회를 남긴다.
+
+        ★'목록이 비었다' 류 지적의 근거다. 실패가 아니라 200 이라 실패 목록에는 안 잡히고,
+          그래서 지금까지 "조회가 0건을 냈는지, 화면이 걸러낸 건지" 를 가릴 수 없었다.
+        ★앱이 '비었다' 를 판정하지 않는다. 작은 응답을 그대로 보여 주고 읽는 쪽이 판단한다
+          - 무엇을 비었다고 볼지(빈 배열·total 0·페이지네이션)는 화면마다 다르다."""
+        with self.lock:
+            p = self._page(self._live_key(key))
+            for rec in p['api']:                # 같은 조회를 여러 번 하면 줄만 늘어난다
+                if rec['request'] == request_url and rec['status'] == status:
+                    rec['ts'], rec['body'] = _now(), body
+                    rec['hits'] = rec.get('hits', 1) + 1
+                    break
+            else:
+                p['api'].append({'ts': _now(), 'request': request_url,
+                                 'status': status, 'body': body, 'hits': 1})
+                del p['api'][:-API_CAP]
+            if not self._replaying:
+                self._append_jsonl({'t': 'api', 'url': p['url'], 'viewport': p['viewport'],
+                                    'request': request_url, 'status': status, 'body': body})
 
     def counts(self):
         pages = [p for p in self.pages.values() if p['annotations']]
         return len(pages), sum(len(p['annotations']) for p in pages)
+
+    def _archive_spots(self):
+        """지난 회차들이 어느 자리를 지적했는지. {(주소, 경로): [회차...]}
+
+        ★같은 자리가 회차를 넘겨 다시 올라오면 받는 쪽이 가장 먼저 알아야 하는 사실이다.
+          '고쳤다더니 또 안 된다' 가 여기서 갈린다 - 지난 회차에 고쳤다고 회신한 자리가
+          다시 지적되면 원인이 그때와 다르다는 뜻이므로, 회신 문안 자체가 달라져야 한다.
+        ★회차 파일은 export() 가 archive/ 에 남겨 둔 것이다. 한 번만 읽고 들고 있는다
+          (렌더는 주석마다 불린다 - 매번 디스크를 훑으면 안 된다)."""
+        if self._spots is not None:
+            return self._spots
+        spots = {}
+        arch = os.path.join(self.out_dir, 'archive')
+        try:
+            names = sorted(os.listdir(arch))
+        except Exception:
+            names = []
+        for name in names:
+            if not name.endswith('-annotations.jsonl'):
+                continue
+            label = _round_label(name)
+            for spot in _spots_of(os.path.join(arch, name)):
+                seen = spots.setdefault(spot, [])
+                if label not in seen:
+                    seen.append(label)
+        self._spots = spots
+        return spots
 
     def tree_rows(self):
         """목록용 행. 화면 한 줄 + 그 밑에 붙는 주석 줄들.
@@ -498,7 +703,7 @@ class Store(object):
     def _render_pages(self):
         """결과에 실리는 화면 목록. 화면 번호는 이 순서로 붙는다(목록과 렌더가 같아야 한다)."""
         return [p for p in self.pages.values()
-                if p['annotations'] or p['console'] or p['network']]
+                if p['annotations'] or p['console'] or p['network'] or p.get('api')]
 
     def _ref_index(self, pages):
         """aid -> (화면번호, 주석번호, element, comment). 연결을 사람이 읽는 좌표로 옮긴다.
@@ -557,7 +762,8 @@ class Store(object):
             pages = self._render_pages()
             total = sum(len(p['annotations']) for p in pages)
             lines = [u'# 화면 주석 - %s' % _now(), u'',
-                     u'- 화면 %d개 · 주석 %d건' % (len(pages), total), u'']
+                     u'- 화면 %d개 · 주석 %d건' % (len(pages), total),
+                     u'- 도구: 화면주석-QA %s' % VER.label(), u'']
             if self.closing:
                 # 받는 사람이 먼저 읽는 자리다(요약 바로 밑).
                 lines += [u'## 총평', u'']
@@ -588,7 +794,7 @@ class Store(object):
                 lines += [u'- 주석 %d건' % len(p['annotations']), u'']
                 lines += self._render_annotations(
                     self._ordered(self.key_of(p['url'], p['viewport']), p['annotations']),
-                    refidx, backidx)
+                    refidx, backidx, p['url'])
                 lines += self._render_noise(p)
             return u'\n'.join(lines)
 
@@ -601,7 +807,7 @@ class Store(object):
         tail = u' — "%s"' % comment[:40] if comment else u''
         return u'[화면 %d] %d번 %s%s' % (i, j, element, tail)
 
-    def _render_annotations(self, items, refidx, backidx):
+    def _render_annotations(self, items, refidx, backidx, page_url=u''):
         lines = []
         for i, (aid, a) in enumerate(items, 1):
             m = self.meta.get(aid) or {}
@@ -631,6 +837,16 @@ class Store(object):
                 lines.append(u'- 관련: ← %s' % self._ref_label(refidx, src))
             lines += [u'- 경로: `%s`' % (a.get('elementPath') or u''),
                       u'- 클래스: `%s`' % (a.get('cssClasses') or u'')]
+            again = self._archive_spots().get(
+                (_spot_url(page_url), a.get('elementPath') or u''))
+            if again:
+                # ★회차를 넘겨 같은 자리가 또 올라왔다. 받는 쪽이 제일 먼저 볼 줄이다.
+                lines.append(u'- ★재지적: 지난 회차에도 같은 자리 (%s)'
+                             % u' · '.join(again[-3:]))
+            if a.get('attrs'):
+                # ★서버가 요소에 실어 보낸 값이다. '무엇이 표시되느냐' 가 아니라
+                #   '무엇이 와 있느냐' 라서, 화면 탓인지 서버 탓인지를 여기서 가른다.
+                lines.append(u'- 속성: %s' % str(a['attrs'])[:300])
             if a.get('selectedText'):
                 lines.append(u'- 선택 텍스트: %s' % a['selectedText'])
             if a.get('nearbyText'):
@@ -643,12 +859,18 @@ class Store(object):
             lines += _geometry_lines(a.get('elementBoundingBoxes'))
             if a.get('nearbyElements'):
                 lines.append(u'- 주변 요소: %s' % str(a['nearbyElements'])[:200])
+            # ★예전에는 원본 스타일을 300자에서 잘라 통째로 냈다. 그 줄은 font-family
+            #   목록이 앞을 먹어 매번 문장 중간에서 끊겼고, 그래서 읽히지 않았다.
+            #   같은 정보를 배치·색·글자 세 줄로 나눠 전부 읽히게 한다.
             lay = _layout_bits(a.get('computedStyles'))
             if lay:
-                # ★자르기에 걸려 사라지던 값들이다. 스타일 줄보다 먼저 세운다.
                 lines.append(u'- 배치: %s' % u' · '.join(lay))
-            if a.get('computedStyles'):
-                lines.append(u'- 스타일: %s' % str(a['computedStyles'])[:300])
+            col = _color_bits(a.get('computedStyles'))
+            if col:
+                lines.append(u'- 색: %s' % u' · '.join(col))
+            txt = _text_bits(a.get('computedStyles'))
+            if txt:
+                lines.append(u'- 글자: %s' % u' · '.join(txt))
             if a.get('reactComponents'):
                 lines.append(u'- React: %s' % a['reactComponents'])
             if a.get('sourceFile'):
@@ -664,11 +886,23 @@ class Store(object):
             for c in p['console']:
                 lines.append(u'- `%s` %s' % (c['ts'], str(c['text'])[:300]))
             lines.append(u'')
+        if p.get('api'):
+            lines += [u'### 이 화면의 조회 응답 %d건 (성공했으나 응답이 짧은 것만)' % len(p['api']),
+                      u'']
+            for a in p['api']:
+                hits = u' ·%d회' % a['hits'] if a.get('hits', 1) > 1 else u''
+                lines.append(u'- `%s` %s → %s%s' % (a['ts'], a['request'], a['status'], hits))
+                if a.get('body'):
+                    lines.append(u'  - 응답: %s' % a['body'])
+            lines.append(u'')
         if p['network']:
             lines += [u'### 이 화면의 실패한 요청 %d건' % len(p['network']), u'']
             for n in p['network']:
                 tail = u' (%s)' % n['reason'] if n['reason'] else u''
                 lines.append(u'- `%s` %s → %s%s' % (n['ts'], n['request'], n['status'], tail))
+                if n.get('body'):
+                    # 서버가 적어 보낸 사유. 이 줄이 없으면 받는 쪽이 되묻는다.
+                    lines.append(u'  - 응답: %s' % n['body'])
             lines.append(u'')
         return lines
 
@@ -703,7 +937,14 @@ class Store(object):
                     elif t == 'network':
                         self.add_network(self.key_of(rec.get('url'), rec.get('viewport')),
                                          rec.get('request'), rec.get('status'),
-                                         rec.get('reason') or '')
+                                         rec.get('reason') or '', rec.get('token') or '')
+                    elif t == 'api':
+                        self.add_api(self.key_of(rec.get('url'), rec.get('viewport')),
+                                     rec.get('request'), rec.get('status'),
+                                     rec.get('body') or '')
+                    elif t == 'netbody':
+                        self.set_network_body(self.key_of(rec.get('url'), rec.get('viewport')),
+                                              rec.get('token'), rec.get('body') or '')
                     elif t == 'merge':
                         self.merge_unknown(rec.get('url'), rec.get('viewport'))
                     elif t == 'meta':
@@ -780,6 +1021,7 @@ class Store(object):
             self.pages.clear()
             self.meta.clear()
             self.order.clear()
+            self.moved.clear()
             self.closing = u''
             keep = set(self.skip)
             self.skip.clear()
@@ -827,9 +1069,15 @@ class Store(object):
                 arch = os.path.join(self.out_dir, 'archive')
                 if not os.path.isdir(arch):
                     os.makedirs(arch)
+                # ★같은 초에 두 번 비우면 앞의 회차를 덮어썼다. 번호를 붙여 남긴다.
+                dest = os.path.join(arch, '%s-annotations.jsonl' % stamp)
+                seq = 1
+                while os.path.exists(dest):
+                    seq += 1
+                    dest = os.path.join(arch,
+                                        '%s_%03d-annotations.jsonl' % (stamp, seq))
                 try:
-                    os.replace(self.jsonl_path,
-                               os.path.join(arch, '%s-annotations.jsonl' % stamp))
+                    os.replace(self.jsonl_path, dest)
                 except Exception:
                     pass
             elif os.path.exists(self.jsonl_path):
@@ -840,6 +1088,8 @@ class Store(object):
             self.pages.clear()
             self.meta.clear()
             self.order.clear()
+            self.moved.clear()
             self.skip.clear()
             self.closing = u''
+            self._spots = None      # 방금 회차가 archive 로 들어갔다 - 다시 읽어야 한다
             self.write_md()

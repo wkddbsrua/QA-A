@@ -10,7 +10,9 @@
   2) python build_inject.py   주입 번들 (DOM 준비 후 실행하도록 감싼 것)
   3) python build_exe.py      이 파일
 """
+import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,6 +29,8 @@ WORK = os.path.join(ROOT, 'build_work')
 def check():
     """다른 PC 에서 '왜 안 되지' 가 되기 전에 여기서 잡는다."""
     problems = []
+    if not os.path.exists(os.path.join(ROOT, 'version.py')):
+        problems.append('version.py 없음 - 판 번호를 붙일 수 없다')
     if not os.path.exists(VENDOR):
         problems.append('vendor/agentation.ko.mjs 없음 → python build_ko.py')
     if not os.path.exists(HELP):
@@ -47,6 +51,24 @@ def check():
     return problems
 
 
+def bump():
+    """version.py 의 BUILD 를 +1 하고 (VERSION, BUILD) 를 돌려준다.
+
+    ★빌드 '전에' 올린다 - exe 안에 박히는 번호(창 머리·툴바·전달 문서)와 파일 이름의
+      번호가 같아야 한다. 빌드가 실패하면 그 번호는 버려진다(번호는 싸고, 어긋난
+      번호는 비싸다 - 같은 이름으로 덮어써서 어느 exe 인지 못 가린 일이 있었다)."""
+    p = os.path.join(ROOT, 'version.py')
+    src = io.open(p, encoding='utf-8').read()
+    m = re.search(r'^BUILD = (\d+)', src, re.M)      # 뒤에 주석이 붙어도 찾는다
+    v = re.search(r"^VERSION = '([^']+)'$", src, re.M)
+    if not m or not v:
+        return None
+    nxt = int(m.group(1)) + 1
+    src = src[:m.start(1)] + str(nxt) + src[m.end(1):]
+    io.open(p, 'w', encoding='utf-8', newline='').write(src)
+    return v.group(1), nxt
+
+
 def main():
     problems = check()
     if problems:
@@ -54,6 +76,14 @@ def main():
         for p in problems:
             print('  · %s' % p)
         return 1
+
+    bumped = bump()
+    if not bumped:
+        print('version.py 에서 VERSION·BUILD 를 찾지 못했습니다.')
+        return 1
+    vstr, build = bumped
+    tag = 'v%s_%03d' % (vstr, build)
+    print('판 v%s (%03d) 로 빌드합니다.' % (vstr, build))
 
     sep = ';' if os.name == 'nt' else ':'
     cmd = [sys.executable, '-m', 'PyInstaller',
@@ -70,10 +100,21 @@ def main():
     if r.returncode != 0:
         return r.returncode
 
-    exe = os.path.join(RELEASE, NAME + ('.exe' if os.name == 'nt' else ''))
+    ext = '.exe' if os.name == 'nt' else ''
+    exe = os.path.join(RELEASE, NAME + ext)
     if not os.path.exists(exe):
         print('산출물을 찾지 못했습니다: %s' % exe)
         return 1
+    # ★판 번호를 파일 이름에 넣는다. 같은 이름으로 덮어쓰면 "이전 exe 에서는 됐는데"
+    #   라는 보고를 어느 판과 비교해야 하는지 알 수 없다(지난 exe 를 남겨 둔다).
+    final = os.path.join(RELEASE, '%s_%s%s' % (NAME, tag, ext))
+    try:
+        if os.path.exists(final):
+            os.remove(final)        # 같은 번호로 다시 빌드한 경우(빌드 실패 후 재시도)
+        os.replace(exe, final)
+        exe = final
+    except OSError as e:
+        print('번호 붙이기 실패(무시 가능): %s' % e)
     print('\n%s  (%.1f MB)' % (exe, os.path.getsize(exe) / 1048576.0))
 
     desktop = os.path.join(os.path.expanduser('~'), 'Desktop')

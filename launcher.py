@@ -40,6 +40,26 @@ def _is_noise(url):
     u = (url or '').split('?')[0].lower()
     return any(n in u for n in NOISE_REQUESTS)   # apple-touch-icon.png 처럼 확장자가 붙는다
 
+
+BODY_CAP = 300          # 실패 응답에서 남길 길이. 사유는 한 문장이라 이만큼이면 넉넉하다.
+API_BODY_MAX = 2048     # 성공 응답은 '이만큼보다 작을 때만' 담는다.
+                        #   ★큰 목록 응답은 비어 있을 리가 없어 진단 가치가 없고, 전부 담으면
+                        #     전달용 문서가 부풀어 붙여넣을 수 없게 된다. 작은 것만 담으면
+                        #     '비었다' 를 앱이 판정하지 않고도 근거가 남는다.
+API_TYPES = ('XHR', 'Fetch')            # 문서·이미지·스크립트는 담지 않는다
+
+
+def _tidy_body(text):
+    """실패 응답 본문을 한 줄로 줄인다.
+
+    ★HTML 오류 페이지는 버린다. 톰캣·nginx 기본 페이지에는 사유가 없고 태그만 길어서,
+      남기면 결과 문서가 읽을 수 없게 부푼다. 우리가 원하는 것은 서버가 적어 보낸
+      JSON/텍스트 사유 한 줄이다."""
+    t = ' '.join(str(text or '').split())
+    if not t or t[:1] == '<':
+        return ''
+    return t[:BODY_CAP]
+
 # 이 PC 에는 다 깔려 있어도 다른 PC 에는 없을 수 있다. 그래서 찾는 곳을 넓게 잡고,
 # 못 찾으면 사람이 읽고 조치할 수 있는 문장으로 알린다(스택트레이스 금지).
 BROWSERS = [
@@ -152,6 +172,8 @@ class Session(object):
         self.url = ''
         self.page_key = None        # (주소, 해상도) - 콘솔·네트워크를 붙일 화면
         self.req_urls = {}          # requestId -> url
+        self.body_wait = {}         # requestId -> page_key (실패 응답 본문을 기다리는 중)
+        self.api_wait = {}          # requestId -> (page_key, url, status) (성공 조회)
         self.contexts = {}          # frameId -> executionContextId (프레임마다 하나)
 
 
@@ -164,8 +186,10 @@ PROFILE_BUSY_MSG = '\n'.join([
 
 
 class Launcher(object):
-    def __init__(self, inject_js, store, profile_dir, log=None, state_path=None):
+    def __init__(self, inject_js, store, profile_dir, log=None, state_path=None,
+                 version=''):
         self.inject_js = inject_js
+        self.version = version or ''      # 브10: 화면의 모드 표시에 같이 나간다
         # 브4: 툴바를 최상위 문서에 고정할지. 새 문서에는 주입 앞에 스위치를 얹는다.
         self.force_top = False
         self.store = store
@@ -339,6 +363,7 @@ class Launcher(object):
         c.on('Runtime.consoleAPICalled', self._on_console)
         c.on('Network.responseReceived', self._on_response)
         c.on('Network.loadingFailed', self._on_failed)
+        c.on('Network.loadingFinished', self._on_finished)
         c.on('Page.frameNavigated', self._on_navigated)
         c.on('Runtime.executionContextCreated', self._on_context)
         c.on('Runtime.executionContextsCleared', self._on_contexts_cleared)
@@ -513,17 +538,82 @@ class Launcher(object):
         r = params.get('response') or {}
         status = r.get('status') or 0
         s = self.sessions.get(sid)
+        rid = params.get('requestId')
         if s is not None:
-            s.req_urls[params.get('requestId')] = r.get('url') or ''
-        if status < 400 or _is_noise(r.get('url')):
+            s.req_urls[rid] = r.get('url') or ''
+        if status < 400:
+            # 성공한 조회. 응답이 작을 때만 담는다 - 크기는 loadingFinished 에서 안다.
+            if (200 <= status < 300 and params.get('type') in API_TYPES
+                    and not _is_noise(r.get('url')) and s is not None and rid):
+                if len(s.api_wait) > 200:
+                    s.api_wait.clear()
+                key = self._page_key(sid)
+                if key:
+                    s.api_wait[rid] = (key, r.get('url') or '', status)
+            return
+        if _is_noise(r.get('url')):
             return
         key = self._page_key(sid)
         if key:
             self.store.add_network(key, r.get('url') or '', status,
-                                   r.get('statusText') or '')
+                                   r.get('statusText') or '', token=rid)
+            # 본문은 아직 오지 않았다. loadingFinished 를 기다렸다가 붙인다.
+            if s is not None and rid:
+                if len(s.body_wait) > 200:      # 끝나지 않은 요청이 쌓이면 버린다
+                    s.body_wait.clear()
+                s.body_wait[rid] = key
+
+    def _on_finished(self, params, sid):
+        """응답 본문을 받아 기록에 붙인다 - 실패한 요청, 그리고 짧은 성공 조회.
+
+        ★getResponseBody 는 응답을 기다리는 호출이다. CDP 수신 스레드에서 그대로 부르면
+          수신이 멈춰 데드락이 된다(_work 주석 참조). 반드시 작업 큐로 넘긴다.
+        ★성공 조회는 여기서 크기를 보고 거른다 - encodedDataLength 는 이 이벤트에만 있다."""
+        s = self.sessions.get(sid)
+        if s is None:
+            return
+        rid = params.get('requestId')
+        key = s.body_wait.pop(rid, None)
+        if key is not None:
+            self._jobs.put(lambda: self._attach_body(sid, rid, key))
+            return
+        hit = s.api_wait.pop(rid, None)
+        if hit is None:
+            return
+        size = params.get('encodedDataLength') or 0
+        try:
+            small = float(size) <= API_BODY_MAX
+        except Exception:
+            small = False
+        if small:
+            self._jobs.put(lambda: self._attach_api(sid, rid, hit))
+
+    def _attach_api(self, sid, rid, hit):
+        key, url, status = hit
+        body = _tidy_body(self._body_of(sid, rid))
+        if body:
+            self.store.add_api(key, url, status, body)
+
+    def _body_of(self, sid, rid):
+        try:
+            res = self.cdp.call('Network.getResponseBody', {'requestId': rid},
+                                session_id=sid, timeout=5) or {}
+        except Exception:
+            return ''                           # 본문이 이미 버려졌다 - 없는 대로 둔다
+        if res.get('base64Encoded'):
+            return ''                           # 이진 응답은 읽어도 쓸모가 없다
+        return res.get('body') or ''
+
+    def _attach_body(self, sid, rid, key):
+        body = _tidy_body(self._body_of(sid, rid))
+        if body:
+            self.store.set_network_body(key, rid, body)
 
     def _on_failed(self, params, sid):
         s = self.sessions.get(sid)
+        if s is not None:
+            s.body_wait.pop(params.get('requestId'), None)
+            s.api_wait.pop(params.get('requestId'), None)
         req = (s.req_urls.pop(params.get('requestId'), '') if s else '')
         key = self._page_key(sid)
         if _is_noise(req):
@@ -739,6 +829,9 @@ class Launcher(object):
     def _source(self):
         """주입할 소스. 설정 스위치를 앞에 얹는다(새로 뜨는 문서에 곧바로 적용된다)."""
         head = 'window.__qaForceTop=%s;\n' % ('true' if self.force_top else 'false')
+        # 브10: 어느 판으로 띄운 화면인지 툴바에서 바로 읽히게 한다.
+        #   ★같은 이름으로 exe 를 덮어써서 "이전에는 됐는데" 를 재현조차 못 한 일이 있었다.
+        head += 'window.__qaVer=%s;\n' % json.dumps(self.version)
         return head + self.inject_js
 
     def set_force_top(self, on):
