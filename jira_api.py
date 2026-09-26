@@ -29,7 +29,7 @@ import urllib.parse
 import urllib.request
 
 DEFAULT_SITE = 'https://your-site.atlassian.net'
-# ★기본 이슈 유형. 사내 프로젝트는 거의 전부 '에픽·작업·자료·QA' 만 있고 'Bug' 는 없다(2026-09-14 실측).
+# ★기본 이슈 유형. 대상 Jira 프로젝트는 거의 전부 '에픽·작업·자료·QA' 만 있고 'Bug' 는 없다(2026-09-14 실측).
 #   'Bug' 를 기본으로 두면 새 이슈 만들기가 첫 시도부터 실패한다.
 DEFAULT_ISSUE_TYPE = u'QA'
 TOKEN_URL = 'https://id.atlassian.com/manage-profile/security/api-tokens'
@@ -275,7 +275,7 @@ class JiraClient(object):
         self.email = email or u''
         self.token = token or u''
         self.timeout = timeout
-        # 사내 프록시가 127.0.0.1 만 막는 것과 달리 외부는 시스템 프록시를 그대로 탄다.
+        # 일부 사내망 프록시가 127.0.0.1 만 막는 것과 달리 외부는 시스템 프록시를 그대로 탄다.
         self._opener = urllib.request.build_opener()
 
     def _auth(self):
