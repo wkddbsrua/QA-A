@@ -3,157 +3,654 @@
     "agentation 번들의 '화면에 보이는 영문'을 한글로 바꾸는 표. build_ko.py 가 이 표만 적용한다.",
     "find 는 원본에 있는 그대로의 조각이다. 여러 곳에서 잡혀야 하는 경우만 count 를 적는다(기본 1).",
     "규칙: 화면에 보이는 것은 전부 번역한다. 단 주석 결과의 element 필드에 박히는 '요소 유형명'은",
-    "      영문으로 남긴다 - 개발자/AI 가 그 이름으로 코드를 찾기 때문이다(allow 첫 그룹)."
+    "      영문으로 남긴다 - 개발자/AI 가 그 이름으로 코드를 찾기 때문이다(allow 첫 그룹).",
+    "patches: 문구가 아닌 동작 기본값 치환(사유 필수)."
   ],
-
   "rules": [
-    { "find": "\"Send Annotations\"", "ko": "\"주석 보내기\"", "why": "툴바 주 액션" },
-    { "find": "\"Copy feedback\"", "ko": "\"피드백 복사\"" },
-    { "find": "\"Copy layout\"", "ko": "\"레이아웃 복사\"" },
-    { "find": "\"Clear all\"", "ko": "\"전체 지우기\"" },
-    { "find": "children: \"Clear\" }", "ko": "children: \"지우기\" }" },
-    { "find": "children: \"Settings\" }", "ko": "children: \"설정\" }" },
-    { "find": "children: \"Cancel\" }", "ko": "children: \"취소\" }" },
-    { "find": "\"Exit\",", "ko": "\"나가기\",", "why": "레이아웃 모드 버튼 툴팁" },
-    { "find": "submitLabel = \"Add\",", "ko": "submitLabel = \"추가\",", "why": "메모 팝업 기본 버튼" },
-    { "find": "submitLabel: editHadTextRef.current ? \"Save\" : \"Set\"", "ko": "submitLabel: editHadTextRef.current ? \"저장\" : \"입력\"" },
-    { "find": "submitLabel: editHadNoteRef.current ? \"Save\" : \"Set\"", "ko": "submitLabel: editHadNoteRef.current ? \"저장\" : \"입력\"" },
-    { "find": "submitLabel: \"Save\",", "ko": "submitLabel: \"저장\"," },
-
-    { "find": "\"Add a note about this section\"", "ko": "\"이 영역에 남길 메모를 입력하세요\"", "why": "메모 입력 플레이스홀더" },
-    { "find": "\"Edit your feedback...\"", "ko": "\"메모 수정...\"" },
-    { "find": "\"Feedback for this group of elements...\"", "ko": "\"묶어 선택한 요소들에 남길 메모...\"" },
-    { "find": "\"What should change?\"", "ko": "\"무엇을 바꿔야 하나요?\"", "count": 2 },
-    { "find": "\"What should change in this area?\"", "ko": "\"이 영역에서 무엇을 바꿔야 하나요?\"" },
-    { "find": "\"Describe this page to provide additional context for your agent.\"", "ko": "\"이 화면이 어떤 페이지인지 적어 주세요. 전달받는 쪽이 맥락을 이해하는 데 쓰입니다.\"" },
-
-    { "find": "\"Clear on copy/send\"", "ko": "\"복사·전송 후 자동 비우기\"", "why": "설정 패널" },
-    { "find": "\"Automatically clear annotations after copying\"", "ko": "\"복사한 뒤 주석을 자동으로 비웁니다\"" },
-    { "find": "\"Block page interactions\"", "ko": "\"페이지 클릭 차단\"" },
-    { "find": "\"Hide markers\"", "ko": "\"핀 숨기기\"" },
-    { "find": "\"Show markers\"", "ko": "\"핀 보이기\"" },
-    { "find": "\"Pause animations\"", "ko": "\"애니메이션 정지\"" },
-    { "find": "\"Resume animations\"", "ko": "\"애니메이션 재생\"" },
-    { "find": "\"Hide Until Restart\"", "ko": "\"새 탭까지 숨기기\"" },
-    { "find": "\"Hides the toolbar until you open a new tab\"", "ko": "\"새 탭을 열 때까지 툴바를 숨깁니다\"" },
-    { "find": "\"Area selection\"", "ko": "\"영역 선택\"", "count": 2, "why": "요소가 아니라 '영역을 끌어 선택함'을 뜻하는 합성 라벨 - 코드에 대응물이 없어 번역 대상" },
-    { "find": "\"Output Detail\"", "ko": "\"출력 상세도\"" },
-    { "find": "\"Controls how much detail is included in the copied output\"", "ko": "\"복사되는 출력에 얼마나 자세히 담을지 정합니다\"" },
-    { "find": "\"Marker Color\"", "ko": "\"핀 색상\"" },
-    { "find": "\"React Components\"", "ko": "\"React 컴포넌트\"" },
-    { "find": "\"Include React component names in annotations\"", "ko": "\"주석에 React 컴포넌트 이름을 함께 담습니다\"" },
-
-    { "find": "value: \"compact\", label: \"Compact\"", "ko": "value: \"compact\", label: \"간단\"", "why": "출력 상세도 4단계 (value 는 저장값이므로 손대지 않는다)" },
-    { "find": "value: \"standard\", label: \"Standard\"", "ko": "value: \"standard\", label: \"표준\"" },
-    { "find": "value: \"detailed\", label: \"Detailed\"", "ko": "value: \"detailed\", label: \"상세\"" },
-    { "find": "value: \"forensic\", label: \"Forensic\"", "ko": "value: \"forensic\", label: \"정밀\"" },
-
-    { "find": "id: \"indigo\", label: \"Indigo\"", "ko": "id: \"indigo\", label: \"남색\"", "why": "핀 색상 7종 (id 는 저장값)" },
-    { "find": "id: \"blue\", label: \"Blue\"", "ko": "id: \"blue\", label: \"파랑\"" },
-    { "find": "id: \"cyan\", label: \"Cyan\"", "ko": "id: \"cyan\", label: \"청록\"" },
-    { "find": "id: \"green\", label: \"Green\"", "ko": "id: \"green\", label: \"초록\"" },
-    { "find": "id: \"yellow\", label: \"Yellow\"", "ko": "id: \"yellow\", label: \"노랑\"" },
-    { "find": "id: \"orange\", label: \"Orange\"", "ko": "id: \"orange\", label: \"주황\"" },
-    { "find": "id: \"red\", label: \"Red\"", "ko": "id: \"red\", label: \"빨강\"" },
-
-    { "find": "\"MCP Connection\"", "ko": "\"MCP 연결\"", "why": "MCP·웹훅 패널" },
-    { "find": "\"MCP Connected\"", "ko": "\"MCP 연결됨\"" },
-    { "find": "\"MCP Connecting...\"", "ko": "\"MCP 연결 중...\"" },
-    { "find": "\"MCP connection allows agents to receive and act on annotations.\"", "ko": "\"MCP 로 연결하면 에이전트가 주석을 받아 처리할 수 있습니다.\"" },
-    { "find": "? \"Connected\" : connectionStatus === \"connecting\" ? \"Connecting...\" : \"Disconnected\"", "ko": "? \"연결됨\" : connectionStatus === \"connecting\" ? \"연결 중...\" : \"연결 끊김\"", "why": "상태값 connected/connecting 은 비교 대상이라 손대지 않는다" },
-    { "find": "\"Manage MCP & Webhooks\"", "ko": "\"MCP·웹훅 관리\"", "count": 2 },
-    { "find": "placeholder: \"Webhook URL\"", "ko": "placeholder: \"웹훅 주소\"" },
-    { "find": "\"The webhook URL will receive live annotation changes and annotation data.\"", "ko": "\"이 주소로 주석 변경과 주석 데이터가 실시간 전송됩니다.\"" },
-    { "find": "\"Auto-Send\"", "ko": "\"자동 전송\"" },
-    { "find": "\"Webhooks\",", "ko": "\"웹훅\",", "why": "자동화 섹션 제목 - 화면에 보인다. 게이트는 통과했지만(allow 에 넣어둔 탓) 눈 대조에서 영문으로 남은 것을 발견해 추가" },
-    { "find": "children: \"Learn more\"", "ko": "children: \"자세히\"" },
-    { "find": "\"Learn more.\"", "ko": "\"자세히.\"" },
-
-    { "find": "\"Layout Mode\"", "ko": "\"레이아웃 모드\"", "why": "레이아웃/와이어프레임 모드" },
-    { "find": "\"Layout mode\"", "ko": "\"레이아웃 모드\"" },
-    { "find": "\"Exit layout mode\"", "ko": "\"레이아웃 모드 종료\"" },
-    { "find": "\"Wireframe Mode\"", "ko": "\"와이어프레임 모드\"" },
-    { "find": "\"Wireframe New Page\"", "ko": "\"새 페이지 와이어프레임\"" },
-    { "find": "\"Start feedback mode\"", "ko": "\"피드백 모드 시작\"" },
-    { "find": "\"Switch to dark mode\"", "ko": "\"다크 모드로 전환\"" },
-    { "find": "\"Switch to light mode\"", "ko": "\"라이트 모드로 전환\"" },
-    { "find": "\"Toggle Opacity\"", "ko": "\"불투명도 전환\"" },
-    { "find": "children: \"Start Over\"", "ko": "children: \"처음부터 다시\"" },
-    { "find": "\"Drag components onto the canvas.\"", "ko": "\"컴포넌트를 캔버스로 끌어다 놓으세요.\"" },
-    { "find": "\"Copied output will only include the wireframed layout.\"", "ko": "\"복사되는 출력에는 와이어프레임 레이아웃만 담깁니다.\"" },
-
-    { "find": "section: \"Blocks\"", "ko": "section: \"블록\"", "why": "팔레트 섹션명" },
-    { "find": "section: \"Content\"", "ko": "section: \"콘텐츠\"" },
-    { "find": "section: \"Controls\"", "ko": "section: \"컨트롤\"" },
-    { "find": "section: \"Elements\"", "ko": "section: \"요소\"" },
-    { "find": "section: \"Layout\"", "ko": "section: \"레이아웃\"" },
-    { "find": "section: \"Section\"", "ko": "section: \"섹션\"" },
-
-    { "find": "[\"Resize\", \"Move\"] : [\"Move\", \"Resize\"]", "ko": "[\"크기 변경\", \"이동\"] : [\"이동\", \"크기 변경\"]", "why": "제안 배지" },
-    { "find": "\"Suggested \",", "ko": "\"제안: \"," },
-    { "find": "`Suggested ${resized ? \"Resize\" : \"Move\"}`", "ko": "`제안: ${resized ? \"크기 변경\" : \"이동\"}`" },
-
-    { "find": "gesture === \"box\" ? \"Boxed\" : \"Circled\"", "ko": "gesture === \"box\" ? \"박스로 표시\" : \"원으로 표시\"", "why": "그림 주석 설명문 - 패널과 출력에 함께 보인다" },
-    { "find": "`${gesture === \"arrow\" ? \"Arrow\" : \"Drawing\"} near **", "ko": "`${gesture === \"arrow\" ? \"화살표\" : \"그림\"} - **" },
-    { "find": "`Arrow from **${elementNames[0]}** to **", "ko": "`화살표: **${elementNames[0]}** -> **" },
-    { "find": "`Drawing at ${region}`", "ko": "`그림 (${region})`" },
-    { "find": "` (and ${elementNames.slice(1).join(\", \")})`", "ko": "` (외 ${elementNames.slice(1).join(\", \")})`" },
-    { "find": "(region: ${region})", "ko": "(영역: ${region})", "count": 2 },
-
-    { "find": "totalCount === 1 ? \"Component\" : \"Components\"", "ko": "totalCount === 1 ? \"곳\" : \"곳\"", "why": "푸터 개수 접미사 - 한글은 단복수 구분이 없다" },
-    { "find": "totalCount === 1 ? \"Change\" : \"Changes\"", "ko": "totalCount === 1 ? \"건\" : \"건\"" },
-
-    { "find": "\"Connect via Model Context Protocol to let AI agents like Claude Code receive annotations in real-time.\"", "ko": "\"Model Context Protocol 로 연결하면 Claude Code 같은 AI 에이전트가 주석을 실시간으로 받습니다.\"", "why": "설정 패널 설명문 - 게이트가 찾아냄" },
-    { "find": "\"Disabled ", "ko": "\"사용 불가 ", "why": "설정 패널 설명문. 문장 안의 em dash escape 를 건드리지 않으려고 앞/뒤 두 조각으로 나눴다" },
-    { "find": " production builds minify component names, making detection unreliable. Use in development mode.\"", "ko": " 운영 빌드는 컴포넌트 이름을 축약해 인식이 불안정합니다. 개발 모드에서 쓰세요.\"" },
-    { "find": "\"Rearrange and resize existing elements, add new components, and explore layout ideas. Agent results may vary.\"", "ko": "\"기존 요소를 옮기고 크기를 바꾸거나 새 컴포넌트를 얹어 배치를 살펴봅니다. 에이전트 결과는 매번 다를 수 있습니다.\"" },
-    { "find": "\"Send annotation data to any URL endpoint when annotations change. Useful for custom integrations.\"", "ko": "\"주석이 바뀔 때마다 지정한 주소로 데이터를 보냅니다. 자체 연동에 쓸 수 있습니다.\"" },
-    { "find": "\"centered ", "ko": "\"가운데 정렬 ", "why": "레이아웃 출력 설명문. 뒤쪽 `margin-inline: auto` 는 CSS 코드라 그대로 둔다" },
-    { "find": "\"Alert message\"", "ko": "\"알림 문구\"", "why": "와이어프레임 블록 안에 그려지는 예시 문구" },
-    { "find": "\"Badge label\"", "ko": "\"배지 라벨\"" },
-    { "find": "\"Banner text\"", "ko": "\"배너 문구\"" },
-    { "find": "\"Brand / nav items\"", "ko": "\"브랜드 / 메뉴 항목\"" },
-    { "find": "\"Button label\"", "ko": "\"버튼 라벨\"" },
-    { "find": "\"Call to action text\"", "ko": "\"행동 유도 문구\"" },
-    { "find": "\"Card title\"", "ko": "\"카드 제목\"" },
-    { "find": "\"Dialog title\"", "ko": "\"대화상자 제목\"" },
-    { "find": "\"Headline text\"", "ko": "\"헤드라인 문구\"" },
-    { "find": "\"Label or content text\"", "ko": "\"라벨 또는 본문\"" },
-    { "find": "\"Metric value\"", "ko": "\"지표 값\"" },
-    { "find": "\"Notification message\"", "ko": "\"알림 메시지\"", "count": 2 },
-    { "find": "\"Placeholder text\"", "ko": "\"안내 문구\"" },
-    { "find": "\"Plan name or price\"", "ko": "\"플랜명 또는 가격\"" },
-    { "find": "\"Product name\"", "ko": "\"상품명\"" },
-    { "find": "\"Quote text\"", "ko": "\"인용 문구\"" },
-    { "find": "\"Search placeholder\"", "ko": "\"검색 안내문\"" },
-    { "find": "\"Tab labels\"", "ko": "\"탭 라벨\"" },
-    { "find": "\"Tag label\"", "ko": "\"태그 라벨\"" }
+    {
+      "find": "\"Send Annotations\"",
+      "ko": "\"주석 보내기\"",
+      "why": "툴바 주 액션"
+    },
+    {
+      "find": "\"Copy feedback\"",
+      "ko": "\"피드백 복사\""
+    },
+    {
+      "find": "\"Copy layout\"",
+      "ko": "\"레이아웃 복사\""
+    },
+    {
+      "find": "\"Clear all\"",
+      "ko": "\"전체 지우기\""
+    },
+    {
+      "find": "children: \"Clear\" }",
+      "ko": "children: \"지우기\" }"
+    },
+    {
+      "find": "children: \"Settings\" }",
+      "ko": "children: \"설정\" }"
+    },
+    {
+      "find": "children: \"Cancel\" }",
+      "ko": "children: \"취소\" }"
+    },
+    {
+      "find": "\"Exit\",",
+      "ko": "\"나가기\",",
+      "why": "레이아웃 모드 버튼 툴팁"
+    },
+    {
+      "find": "submitLabel = \"Add\",",
+      "ko": "submitLabel = \"추가\",",
+      "why": "메모 팝업 기본 버튼"
+    },
+    {
+      "find": "submitLabel: editHadTextRef.current ? \"Save\" : \"Set\"",
+      "ko": "submitLabel: editHadTextRef.current ? \"저장\" : \"입력\""
+    },
+    {
+      "find": "submitLabel: editHadNoteRef.current ? \"Save\" : \"Set\"",
+      "ko": "submitLabel: editHadNoteRef.current ? \"저장\" : \"입력\""
+    },
+    {
+      "find": "submitLabel: \"Save\",",
+      "ko": "submitLabel: \"저장\","
+    },
+    {
+      "find": "\"Add a note about this section\"",
+      "ko": "\"이 영역에 남길 메모를 입력하세요\"",
+      "why": "메모 입력 플레이스홀더"
+    },
+    {
+      "find": "\"Edit your feedback...\"",
+      "ko": "\"메모 수정...\""
+    },
+    {
+      "find": "\"Feedback for this group of elements...\"",
+      "ko": "\"묶어 선택한 요소들에 남길 메모...\""
+    },
+    {
+      "find": "\"What should change?\"",
+      "ko": "\"무엇을 바꿔야 하나요?\"",
+      "count": 2
+    },
+    {
+      "find": "\"What should change in this area?\"",
+      "ko": "\"이 영역에서 무엇을 바꿔야 하나요?\""
+    },
+    {
+      "find": "\"Describe this page to provide additional context for your agent.\"",
+      "ko": "\"이 화면이 어떤 페이지인지 적어 주세요. 전달받는 쪽이 맥락을 이해하는 데 쓰입니다.\""
+    },
+    {
+      "find": "\"Clear on copy/send\"",
+      "ko": "\"복사·전송 후 자동 비우기\"",
+      "why": "설정 패널"
+    },
+    {
+      "find": "\"Automatically clear annotations after copying\"",
+      "ko": "\"복사한 뒤 주석을 자동으로 비웁니다\""
+    },
+    {
+      "find": "\"Block page interactions\"",
+      "ko": "\"페이지 클릭 차단\""
+    },
+    {
+      "find": "\"Hide markers\"",
+      "ko": "\"핀 숨기기\""
+    },
+    {
+      "find": "\"Show markers\"",
+      "ko": "\"핀 보이기\""
+    },
+    {
+      "find": "\"Pause animations\"",
+      "ko": "\"애니메이션 정지\""
+    },
+    {
+      "find": "\"Resume animations\"",
+      "ko": "\"애니메이션 재생\""
+    },
+    {
+      "find": "\"Hide Until Restart\"",
+      "ko": "\"새 탭까지 숨기기\""
+    },
+    {
+      "find": "\"Hides the toolbar until you open a new tab\"",
+      "ko": "\"새 탭을 열 때까지 툴바를 숨깁니다\""
+    },
+    {
+      "find": "\"Area selection\"",
+      "ko": "\"영역 선택\"",
+      "count": 2,
+      "why": "요소가 아니라 '영역을 끌어 선택함'을 뜻하는 합성 라벨 - 코드에 대응물이 없어 번역 대상"
+    },
+    {
+      "find": "\"Output Detail\"",
+      "ko": "\"출력 상세도\""
+    },
+    {
+      "find": "\"Controls how much detail is included in the copied output\"",
+      "ko": "\"복사되는 출력에 얼마나 자세히 담을지 정합니다\""
+    },
+    {
+      "find": "\"Marker Color\"",
+      "ko": "\"핀 색상\""
+    },
+    {
+      "find": "\"React Components\"",
+      "ko": "\"React 컴포넌트\""
+    },
+    {
+      "find": "\"Include React component names in annotations\"",
+      "ko": "\"주석에 React 컴포넌트 이름을 함께 담습니다\""
+    },
+    {
+      "find": "value: \"compact\", label: \"Compact\"",
+      "ko": "value: \"compact\", label: \"간단\"",
+      "why": "출력 상세도 4단계 (value 는 저장값이므로 손대지 않는다)"
+    },
+    {
+      "find": "value: \"standard\", label: \"Standard\"",
+      "ko": "value: \"standard\", label: \"표준\""
+    },
+    {
+      "find": "value: \"detailed\", label: \"Detailed\"",
+      "ko": "value: \"detailed\", label: \"상세\""
+    },
+    {
+      "find": "value: \"forensic\", label: \"Forensic\"",
+      "ko": "value: \"forensic\", label: \"정밀\""
+    },
+    {
+      "find": "id: \"indigo\", label: \"Indigo\"",
+      "ko": "id: \"indigo\", label: \"남색\"",
+      "why": "핀 색상 7종 (id 는 저장값)"
+    },
+    {
+      "find": "id: \"blue\", label: \"Blue\"",
+      "ko": "id: \"blue\", label: \"파랑\""
+    },
+    {
+      "find": "id: \"cyan\", label: \"Cyan\"",
+      "ko": "id: \"cyan\", label: \"청록\""
+    },
+    {
+      "find": "id: \"green\", label: \"Green\"",
+      "ko": "id: \"green\", label: \"초록\""
+    },
+    {
+      "find": "id: \"yellow\", label: \"Yellow\"",
+      "ko": "id: \"yellow\", label: \"노랑\""
+    },
+    {
+      "find": "id: \"orange\", label: \"Orange\"",
+      "ko": "id: \"orange\", label: \"주황\""
+    },
+    {
+      "find": "id: \"red\", label: \"Red\"",
+      "ko": "id: \"red\", label: \"빨강\""
+    },
+    {
+      "find": "\"MCP Connection\"",
+      "ko": "\"MCP 연결\"",
+      "why": "MCP·웹훅 패널"
+    },
+    {
+      "find": "\"MCP Connected\"",
+      "ko": "\"MCP 연결됨\""
+    },
+    {
+      "find": "\"MCP Connecting...\"",
+      "ko": "\"MCP 연결 중...\""
+    },
+    {
+      "find": "\"MCP connection allows agents to receive and act on annotations.\"",
+      "ko": "\"MCP 로 연결하면 에이전트가 주석을 받아 처리할 수 있습니다.\""
+    },
+    {
+      "find": "? \"Connected\" : connectionStatus === \"connecting\" ? \"Connecting...\" : \"Disconnected\"",
+      "ko": "? \"연결됨\" : connectionStatus === \"connecting\" ? \"연결 중...\" : \"연결 끊김\"",
+      "why": "상태값 connected/connecting 은 비교 대상이라 손대지 않는다"
+    },
+    {
+      "find": "\"Manage MCP & Webhooks\"",
+      "ko": "\"MCP·웹훅 관리\"",
+      "count": 2
+    },
+    {
+      "find": "placeholder: \"Webhook URL\"",
+      "ko": "placeholder: \"웹훅 주소\""
+    },
+    {
+      "find": "\"The webhook URL will receive live annotation changes and annotation data.\"",
+      "ko": "\"이 주소로 주석 변경과 주석 데이터가 실시간 전송됩니다.\""
+    },
+    {
+      "find": "\"Auto-Send\"",
+      "ko": "\"자동 전송\""
+    },
+    {
+      "find": "\"Webhooks\",",
+      "ko": "\"웹훅\",",
+      "why": "자동화 섹션 제목 - 화면에 보인다. 게이트는 통과했지만(allow 에 넣어둔 탓) 눈 대조에서 영문으로 남은 것을 발견해 추가"
+    },
+    {
+      "find": "children: \"Learn more\"",
+      "ko": "children: \"자세히\""
+    },
+    {
+      "find": "\"Learn more.\"",
+      "ko": "\"자세히.\""
+    },
+    {
+      "find": "\"Layout Mode\"",
+      "ko": "\"레이아웃 모드\"",
+      "why": "레이아웃/와이어프레임 모드"
+    },
+    {
+      "find": "\"Layout mode\"",
+      "ko": "\"레이아웃 모드\""
+    },
+    {
+      "find": "\"Exit layout mode\"",
+      "ko": "\"레이아웃 모드 종료\""
+    },
+    {
+      "find": "\"Wireframe Mode\"",
+      "ko": "\"와이어프레임 모드\""
+    },
+    {
+      "find": "\"Wireframe New Page\"",
+      "ko": "\"새 페이지 와이어프레임\""
+    },
+    {
+      "find": "\"Start feedback mode\"",
+      "ko": "\"피드백 모드 시작\""
+    },
+    {
+      "find": "\"Switch to dark mode\"",
+      "ko": "\"다크 모드로 전환\""
+    },
+    {
+      "find": "\"Switch to light mode\"",
+      "ko": "\"라이트 모드로 전환\""
+    },
+    {
+      "find": "\"Toggle Opacity\"",
+      "ko": "\"불투명도 전환\""
+    },
+    {
+      "find": "children: \"Start Over\"",
+      "ko": "children: \"처음부터 다시\""
+    },
+    {
+      "find": "\"Drag components onto the canvas.\"",
+      "ko": "\"컴포넌트를 캔버스로 끌어다 놓으세요.\""
+    },
+    {
+      "find": "\"Copied output will only include the wireframed layout.\"",
+      "ko": "\"복사되는 출력에는 와이어프레임 레이아웃만 담깁니다.\""
+    },
+    {
+      "find": "section: \"Blocks\"",
+      "ko": "section: \"블록\"",
+      "why": "팔레트 섹션명"
+    },
+    {
+      "find": "section: \"Content\"",
+      "ko": "section: \"콘텐츠\""
+    },
+    {
+      "find": "section: \"Controls\"",
+      "ko": "section: \"컨트롤\""
+    },
+    {
+      "find": "section: \"Elements\"",
+      "ko": "section: \"요소\""
+    },
+    {
+      "find": "section: \"Layout\"",
+      "ko": "section: \"레이아웃\""
+    },
+    {
+      "find": "section: \"Section\"",
+      "ko": "section: \"섹션\""
+    },
+    {
+      "find": "[\"Resize\", \"Move\"] : [\"Move\", \"Resize\"]",
+      "ko": "[\"크기 변경\", \"이동\"] : [\"이동\", \"크기 변경\"]",
+      "why": "제안 배지"
+    },
+    {
+      "find": "\"Suggested \",",
+      "ko": "\"제안: \","
+    },
+    {
+      "find": "`Suggested ${resized ? \"Resize\" : \"Move\"}`",
+      "ko": "`제안: ${resized ? \"크기 변경\" : \"이동\"}`"
+    },
+    {
+      "find": "gesture === \"box\" ? \"Boxed\" : \"Circled\"",
+      "ko": "gesture === \"box\" ? \"박스로 표시\" : \"원으로 표시\"",
+      "why": "그림 주석 설명문 - 패널과 출력에 함께 보인다"
+    },
+    {
+      "find": "`${gesture === \"arrow\" ? \"Arrow\" : \"Drawing\"} near **",
+      "ko": "`${gesture === \"arrow\" ? \"화살표\" : \"그림\"} - **"
+    },
+    {
+      "find": "`Arrow from **${elementNames[0]}** to **",
+      "ko": "`화살표: **${elementNames[0]}** -> **"
+    },
+    {
+      "find": "`Drawing at ${region}`",
+      "ko": "`그림 (${region})`"
+    },
+    {
+      "find": "` (and ${elementNames.slice(1).join(\", \")})`",
+      "ko": "` (외 ${elementNames.slice(1).join(\", \")})`"
+    },
+    {
+      "find": "(region: ${region})",
+      "ko": "(영역: ${region})",
+      "count": 2
+    },
+    {
+      "find": "totalCount === 1 ? \"Component\" : \"Components\"",
+      "ko": "totalCount === 1 ? \"곳\" : \"곳\"",
+      "why": "푸터 개수 접미사 - 한글은 단복수 구분이 없다"
+    },
+    {
+      "find": "totalCount === 1 ? \"Change\" : \"Changes\"",
+      "ko": "totalCount === 1 ? \"건\" : \"건\""
+    },
+    {
+      "find": "\"Connect via Model Context Protocol to let AI agents like Claude Code receive annotations in real-time.\"",
+      "ko": "\"Model Context Protocol 로 연결하면 Claude Code 같은 AI 에이전트가 주석을 실시간으로 받습니다.\"",
+      "why": "설정 패널 설명문 - 게이트가 찾아냄"
+    },
+    {
+      "find": "\"Disabled ",
+      "ko": "\"사용 불가 ",
+      "why": "설정 패널 설명문. 문장 안의 em dash escape 를 건드리지 않으려고 앞/뒤 두 조각으로 나눴다"
+    },
+    {
+      "find": " production builds minify component names, making detection unreliable. Use in development mode.\"",
+      "ko": " 운영 빌드는 컴포넌트 이름을 축약해 인식이 불안정합니다. 개발 모드에서 쓰세요.\""
+    },
+    {
+      "find": "\"Rearrange and resize existing elements, add new components, and explore layout ideas. Agent results may vary.\"",
+      "ko": "\"기존 요소를 옮기고 크기를 바꾸거나 새 컴포넌트를 얹어 배치를 살펴봅니다. 에이전트 결과는 매번 다를 수 있습니다.\""
+    },
+    {
+      "find": "\"Send annotation data to any URL endpoint when annotations change. Useful for custom integrations.\"",
+      "ko": "\"주석이 바뀔 때마다 지정한 주소로 데이터를 보냅니다. 자체 연동에 쓸 수 있습니다.\""
+    },
+    {
+      "find": "\"centered ",
+      "ko": "\"가운데 정렬 ",
+      "why": "레이아웃 출력 설명문. 뒤쪽 `margin-inline: auto` 는 CSS 코드라 그대로 둔다"
+    },
+    {
+      "find": "\"Alert message\"",
+      "ko": "\"알림 문구\"",
+      "why": "와이어프레임 블록 안에 그려지는 예시 문구"
+    },
+    {
+      "find": "\"Badge label\"",
+      "ko": "\"배지 라벨\""
+    },
+    {
+      "find": "\"Banner text\"",
+      "ko": "\"배너 문구\""
+    },
+    {
+      "find": "\"Brand / nav items\"",
+      "ko": "\"브랜드 / 메뉴 항목\""
+    },
+    {
+      "find": "\"Button label\"",
+      "ko": "\"버튼 라벨\""
+    },
+    {
+      "find": "\"Call to action text\"",
+      "ko": "\"행동 유도 문구\""
+    },
+    {
+      "find": "\"Card title\"",
+      "ko": "\"카드 제목\""
+    },
+    {
+      "find": "\"Dialog title\"",
+      "ko": "\"대화상자 제목\""
+    },
+    {
+      "find": "\"Headline text\"",
+      "ko": "\"헤드라인 문구\""
+    },
+    {
+      "find": "\"Label or content text\"",
+      "ko": "\"라벨 또는 본문\""
+    },
+    {
+      "find": "\"Metric value\"",
+      "ko": "\"지표 값\""
+    },
+    {
+      "find": "\"Notification message\"",
+      "ko": "\"알림 메시지\"",
+      "count": 2
+    },
+    {
+      "find": "\"Placeholder text\"",
+      "ko": "\"안내 문구\""
+    },
+    {
+      "find": "\"Plan name or price\"",
+      "ko": "\"플랜명 또는 가격\""
+    },
+    {
+      "find": "\"Product name\"",
+      "ko": "\"상품명\""
+    },
+    {
+      "find": "\"Quote text\"",
+      "ko": "\"인용 문구\""
+    },
+    {
+      "find": "\"Search placeholder\"",
+      "ko": "\"검색 안내문\""
+    },
+    {
+      "find": "\"Tab labels\"",
+      "ko": "\"탭 라벨\""
+    },
+    {
+      "find": "\"Tag label\"",
+      "ko": "\"태그 라벨\""
+    }
   ],
-
   "allow": [
     {
       "why": "요소 유형명 - 주석 결과의 element 필드에 그대로 박힌다(COMPONENT_MAP[type].label). 개발자/AI 가 이 이름으로 코드를 찾으므로 한글로 바꾸면 손해다.",
-      "exact": ["Accordion", "Alert", "Avatar", "Badge", "Banner", "Breadcrumb", "Button", "CTA", "Calendar", "Card", "Carousel", "Chart", "Checkbox", "Chip", "Code Block", "Contact", "Date Picker", "Divider", "Drawer", "Dropdown", "FAQ", "Feature", "File Upload", "Footer", "Form", "Gallery", "Grid", "Header", "Hero", "Icon", "Image", "Input", "List", "Login", "Logo", "Map", "Modal", "Navigation", "Notification", "Pagination", "Popover", "Pricing", "Product Card", "Profile", "Progress", "Radio", "Rating", "Search", "Section", "Sidebar", "Skeleton", "Slider", "Spinner", "Stat", "Stepper", "Table", "Tabs", "Tag", "Team", "Testimonial", "Text", "Timeline", "Toast", "Toggle", "Tooltip", "Video"]
+      "exact": [
+        "Accordion",
+        "Alert",
+        "Avatar",
+        "Badge",
+        "Banner",
+        "Breadcrumb",
+        "Button",
+        "CTA",
+        "Calendar",
+        "Card",
+        "Carousel",
+        "Chart",
+        "Checkbox",
+        "Chip",
+        "Code Block",
+        "Contact",
+        "Date Picker",
+        "Divider",
+        "Drawer",
+        "Dropdown",
+        "FAQ",
+        "Feature",
+        "File Upload",
+        "Footer",
+        "Form",
+        "Gallery",
+        "Grid",
+        "Header",
+        "Hero",
+        "Icon",
+        "Image",
+        "Input",
+        "List",
+        "Login",
+        "Logo",
+        "Map",
+        "Modal",
+        "Navigation",
+        "Notification",
+        "Pagination",
+        "Popover",
+        "Pricing",
+        "Product Card",
+        "Profile",
+        "Progress",
+        "Radio",
+        "Rating",
+        "Search",
+        "Section",
+        "Sidebar",
+        "Skeleton",
+        "Slider",
+        "Spinner",
+        "Stat",
+        "Stepper",
+        "Table",
+        "Tabs",
+        "Tag",
+        "Team",
+        "Testimonial",
+        "Text",
+        "Timeline",
+        "Toast",
+        "Toggle",
+        "Tooltip",
+        "Video"
+      ]
     },
     {
       "why": "identifyElement() 반환값 - 위와 같은 이유로 element 필드에 들어간다.",
-      "exact": ["Main Content", "button icon", "graphic element", "list item", "code block", "Arrow", "Drawing", "Boxed", "Circled", "Resize", "Move"]
+      "exact": [
+        "Main Content",
+        "button icon",
+        "graphic element",
+        "list item",
+        "code block",
+        "Arrow",
+        "Drawing",
+        "Boxed",
+        "Circled",
+        "Resize",
+        "Move"
+      ]
     },
     {
       "why": "키보드 키 이름 - 바꾸면 단축키 비교가 깨진다.",
-      "exact": ["Escape", "Esc", "Backspace", "Delete", "Enter", "Shift", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Tab", "Space"]
+      "exact": [
+        "Escape",
+        "Esc",
+        "Backspace",
+        "Delete",
+        "Enter",
+        "Shift",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+        "Tab",
+        "Space"
+      ]
     },
     {
       "why": "React 내부 이름 · HTTP 메서드 · DOM 상수",
-      "exact": ["Fragment", "Profiler", "Suspense", "Outlet", "Route", "Routes", "Component", "Components", "Change", "Changes", "Article", "Hot", "POST", "PATCH", "DELETE", "Root", "Meta"]
+      "exact": [
+        "Fragment",
+        "Profiler",
+        "Suspense",
+        "Outlet",
+        "Route",
+        "Routes",
+        "Component",
+        "Components",
+        "Change",
+        "Changes",
+        "Article",
+        "Hot",
+        "POST",
+        "PATCH",
+        "DELETE",
+        "Root",
+        "Meta"
+      ]
     },
     {
       "why": "화면에 보이는 자리에서는 이미 한글로 치환했다(문맥을 못박은 규칙). 여기 남은 같은 문자열은 저장값·비교값·CSS 클래스라 손대면 기능이 깨진다.",
-      "exact": ["Add", "Clear", "Save", "Set", "Cancel", "Settings", "Exit", "Start Over", "Suggested", "Connected", "Disconnected", "Standard", "Compact", "Detailed", "Forensic", "Blue", "Red", "Green", "Cyan", "Yellow", "Orange", "Indigo", "Layout", "Blocks", "Content", "Controls", "Elements"]
+      "exact": [
+        "Add",
+        "Clear",
+        "Save",
+        "Set",
+        "Cancel",
+        "Settings",
+        "Exit",
+        "Start Over",
+        "Suggested",
+        "Connected",
+        "Disconnected",
+        "Standard",
+        "Compact",
+        "Detailed",
+        "Forensic",
+        "Blue",
+        "Red",
+        "Green",
+        "Cyan",
+        "Yellow",
+        "Orange",
+        "Indigo",
+        "Layout",
+        "Blocks",
+        "Content",
+        "Controls",
+        "Elements"
+      ]
     },
     {
       "why": "CSS 값 · 폰트 스택 · 셀렉터 · SVG path · 코드 문자열",
-      "patterns": ["^[MmLlCcZzHhVvAaQqSsTt][0-9 .,-]", "^(Segoe UI|SF Mono|Menlo|Roboto Mono|Liberation Mono|Courier New)$", "^color", "^top left$", "^use client$", "cubic-bezier", "^[a-z0-9,.\\[\\]='#*>: /-]+$"]
+      "patterns": [
+        "^[MmLlCcZzHhVvAaQqSsTt][0-9 .,-]",
+        "^(Segoe UI|SF Mono|Menlo|Roboto Mono|Liberation Mono|Courier New)$",
+        "^color",
+        "^top left$",
+        "^use client$",
+        "cubic-bezier",
+        "^[a-z0-9,.\\[\\]='#*>: /-]+$"
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "why": "새 페이지 와이어프레임의 불투명도 기본값. 캔버스가 불투명(1)해서 아래 화면이 안 보인다는 실사용 요구(브5). 사용자 슬라이더(0~1)는 그대로 두고 기본값만 바꾼다. 인라인 style 로 들어가는 값이라 CSS 로는 이길 수 없고, 이기면 슬라이더가 죽는다.",
+      "find": "setCanvasOpacity] = useState6(1)",
+      "to": "setCanvasOpacity] = useState6(0.5)",
+      "count": 1
     }
   ]
 }

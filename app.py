@@ -199,9 +199,12 @@ class App(tk.Tk):
         self._fit_window(980, 660, 820, 520)
 
         self.store = Store(OUT_DIR)
+        # 브4: 툴바를 최상위 화면에 고정할지(설정에 남는다)
+        self.force_top = tk.BooleanVar(value=False)
         self.launcher = None
         self._starting = False      # [QA 시작] 연타로 브라우저가 두 번 뜨지 않게
         self.settings = self.load_settings()
+        self.force_top.set(bool(self.settings.get('toolbar_top')))
         # ★작업 스레드는 tkinter 를 직접 만지지 않는다.
         #   after() 조차 다른 스레드에서 부르면 "main thread is not in main loop" 로
         #   죽는다(실측 - 이 때문에 [QA 시작] 이 실패했다). 메시지만 큐에 넣고
@@ -269,6 +272,7 @@ class App(tk.Tk):
     def save_settings(self):
         try:
             self.settings['last_url'] = self.target_url.get().strip()
+            self.settings['toolbar_top'] = bool(self.force_top.get())
             with io.open(SETTINGS, 'w', encoding='utf-8') as f:
                 f.write(json.dumps(self.settings, ensure_ascii=False, indent=2))
         except Exception:
@@ -339,6 +343,14 @@ class App(tk.Tk):
         ttk.Button(bar, text='비우기 (보관)', command=self.do_reset).pack(side='right', padx=(0, 8))
         ttk.Button(bar, text='추출 (저장 후 삭제)', command=self.do_export).pack(side='right', padx=(0, 8))
         ttk.Button(bar, text='클립보드 복사', command=self.do_copy).pack(side='right', padx=(0, 8))
+
+        # 브4: 툴바를 최상위 화면에 고정(좌측 메뉴·상단바도 주석 가능, iframe 내부는 불가)
+        opt = ttk.Frame(wrap)
+        opt.pack(fill='x', pady=(0, 4))
+        tk.Checkbutton(opt, variable=self.force_top, bg='#ffffff', font=(self.ui_font, 9),
+                       text='툴바를 최상위 화면에 고정  (좌측 메뉴·상단바에도 주석 가능 · '
+                            'iframe 안쪽은 고를 수 없음)',
+                       command=self.apply_force_top).pack(side='left')
 
         cols = ('no', 'title', 'vp', 'url', 'ann', 'con', 'net')
         # ★화면 밑에 주석을 펼친다(show 에 'tree' 를 넣어야 펼침 화살표가 생긴다).
@@ -455,6 +467,7 @@ class App(tk.Tk):
         # 목록이 비어 있다면(= 이미 추출/비우기 했다면) 브라우저에 남은 지난 주석도 정리한다.
         # 그러지 않으면 브라우저를 띄울 때마다 옛 마커가 다시 보인다.
         self.launcher.clear_stale = (self.store.counts()[1] == 0)
+        self.launcher.force_top = bool(self.force_top.get())
         self._starting = True
 
         def run():
@@ -631,6 +644,25 @@ class App(tk.Tk):
             self.tree.selection_set(iid)
             self.tree.see(iid)
         self.log('주석 순서를 옮겼습니다.')
+
+    def apply_force_top(self):
+        """툴바 위치 설정을 지금 떠 있는 브라우저에도 바로 적용한다(브4)."""
+        on = bool(self.force_top.get())
+        self.settings['toolbar_top'] = on
+        self.save_settings()
+        if not (self.launcher and self.launcher.alive() and self.launcher.cdp):
+            self.log('툴바 위치: %s (브라우저를 열면 적용됩니다)'
+                     % ('최상위 화면 고정' if on else '자동'))
+            return
+        try:
+            n = self.launcher.set_force_top(on)
+        except Exception as e:
+            self.log('툴바 위치 적용 실패: %s' % e)
+            return
+        self.log('툴바 위치: %s · 문서 %d곳에 적용%s'
+                 % ('최상위 화면 고정' if on else '자동', n,
+                    ' (좌측 메뉴·상단바도 주석 가능 · iframe 안쪽은 고를 수 없습니다)'
+                    if on else ''))
 
     def do_undo(self):
         """브7: 실수로 지운 것을 되살린다."""

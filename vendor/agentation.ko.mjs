@@ -8297,7 +8297,7 @@ function PageFeedbackToolbarCSS({
   const designPlacementsLoaded = useRef6(false);
   const [blankCanvas, setBlankCanvas] = useState6(false);
   const [canvasReady, setCanvasReady] = useState6(false);
-  const [canvasOpacity, setCanvasOpacity] = useState6(1);
+  const [canvasOpacity, setCanvasOpacity] = useState6(0.5);
   const [canvasPurpose, setCanvasPurpose] = useState6("new-page");
   const [wireframePurpose, setWireframePurpose] = useState6("");
   const [designInteracting, setDesignInteracting] = useState6(false);

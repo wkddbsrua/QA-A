@@ -35,6 +35,13 @@ top layer(`popover`) 로 올라가고, native 모달이 열리면 그 `<dialog>`
 나눠 쓰는 것이 핵심이다. **우리 리스너가 agentation 보다 먼저 등록된다는 전제**가 깨지면 둘 다 깨진다.
 모달이 열려 있으면 Esc 로 모드를 켜지 않는다(그 Esc 는 모달을 닫는 것이다).
 
+## 툴바 위치·와이어프레임
+`iframe` 규칙 1(툴바는 탭마다 하나)을 **이중 마운트로 되돌리지 않는다.**
+"좌측 메뉴 포함" 과 "iframe 내부 선택" 은 동시에 성립하지 않으므로 **사람이 고르게** 한다
+(프로그램 창 체크박스 → `window.__qaForceTop`). 전환은 `__qaRemount`(저장소 무해)로 한다 —
+`__qaClear` 는 주석까지 지운다.
+동작 기본값을 바꿔야 하면 `ko.strings.json` 의 **`patches`** 절에 사유와 함께 넣는다(번역 rules 와 섞지 않는다).
+
 ## 진단 규칙
 "안 되는데?" 를 들으면 추측하지 말고 **그 브라우저에 CDP 로 붙어 DOM 을 본다** —
 `document.__qaDoc` · `window.__qaInjected` · `window.__qaReady` · `<style>` 개수 ·

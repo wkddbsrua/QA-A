@@ -166,6 +166,8 @@ PROFILE_BUSY_MSG = '\n'.join([
 class Launcher(object):
     def __init__(self, inject_js, store, profile_dir, log=None, state_path=None):
         self.inject_js = inject_js
+        # 브4: 툴바를 최상위 문서에 고정할지. 새 문서에는 주입 앞에 스위치를 얹는다.
+        self.force_top = False
         self.store = store
         self.profile_dir = profile_dir
         # 우리가 띄운 포트를 우리 파일에 적어 둔다. 크롬의 DevToolsActivePort 는
@@ -382,7 +384,7 @@ class Launcher(object):
         c.call('Network.enable', session_id=s.sid)
         c.call('Runtime.addBinding', {'name': BINDING}, session_id=s.sid)
         c.call('Page.addScriptToEvaluateOnNewDocument',
-               {'source': self.inject_js}, session_id=s.sid)
+               {'source': self._source()}, session_id=s.sid)
         # 하위 프레임(별도 프로세스로 뜬 iframe)도 같은 처리를 받게 한다
         c.call('Target.setAutoAttach', {'autoAttach': True,
                                         'waitForDebuggerOnStart': True,
@@ -396,7 +398,7 @@ class Launcher(object):
             time.sleep(0.4)                     # executionContextCreated 가 도착할 틈
             targets = list(s.contexts.values()) or [None]
             for ctx in targets:
-                params = {'expression': self.inject_js, 'awaitPromise': False}
+                params = {'expression': self._source(), 'awaitPromise': False}
                 if ctx is not None:
                     params['contextId'] = ctx
                 try:
@@ -638,6 +640,36 @@ class Launcher(object):
                 except Exception:
                     continue
         return total
+
+    def _source(self):
+        """주입할 소스. 설정 스위치를 앞에 얹는다(새로 뜨는 문서에 곧바로 적용된다)."""
+        head = 'window.__qaForceTop=%s;\n' % ('true' if self.force_top else 'false')
+        return head + self.inject_js
+
+    def set_force_top(self, on):
+        """툴바 위치 설정을 지금 떠 있는 문서에도 적용한다(브4).
+
+        ★__qaClear 를 쓰지 않는다. 그것은 저장된 주석까지 지운다 - 설정을 바꾸다가
+          작업을 잃으면 안 된다. 그래서 __qaRemount 를 따로 뒀다."""
+        self.force_top = bool(on)
+        expr = ('(function(){window.__qaForceTop=%s;'
+                'return typeof window.__qaRemount==="function"?window.__qaRemount():null;})()'
+                % ('true' if self.force_top else 'false'))
+        touched = 0
+        for s in list(self.sessions.values()):
+            if s.type not in ('page', 'iframe'):
+                continue
+            ctxs = list(s.contexts.values()) or [None]
+            for ctx in ctxs:
+                params = {'expression': expr, 'returnByValue': True}
+                if ctx is not None:
+                    params['contextId'] = ctx
+                try:
+                    self.cdp.call('Runtime.evaluate', params, session_id=s.sid, timeout=8)
+                    touched += 1
+                except Exception:
+                    continue
+        return touched
 
     def check_injected(self):
         """툴바가 뜬 탭 수. 사람이 눈으로 "떴나?" 확인하지 않게 프로그램이 스스로 본다.

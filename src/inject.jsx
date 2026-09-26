@@ -79,8 +79,16 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         }
     }
 
+    /* 프로그램이 켜 주는 스위치(브4). 최상위 화면에 툴바를 고정한다 -
+     * 좌측 메뉴·상단바에도 주석을 달 수 있다. 대신 iframe 내부 요소는 고를 수 없다
+     * (문서가 다르면 히트테스트가 안 된다 - 이 둘은 동시에 성립하지 않는다). */
+    function forceTop() {
+        try { return !!window.__qaForceTop; } catch (e) { return false; }
+    }
+
     function shouldMount() {
         if (!document.body) return false;
+        if (forceTop()) return window.top === window.self;
         if (window.top === window.self) return !dominantFrameExists();
         if (window.innerWidth < MIN_SIZE || window.innerHeight < MIN_SIZE) return false;
         var pa = parentArea();
@@ -294,6 +302,42 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
      *   모달 판정은 표준 신호(dialog[open]·aria-modal·role=dialog)로만 한다.
      *   그 표시가 없는 모달은 가려낼 수 없다 - 그때는 툴바의 [나가기] 로 끈다.
      */
+    /* 같은 출처 자식 프레임 중 툴바를 가진 쪽을 토글한다(없으면 false). */
+    function toggleChild() {
+        try {
+            var fs = document.querySelectorAll('iframe');
+            for (var i = 0; i < fs.length; i++) {
+                var w = null;
+                try { w = fs[i].contentWindow; } catch (e) { continue; }
+                if (!w) continue;
+                try {
+                    if (typeof w.__qaToggleMode === 'function' &&
+                        w.document.getElementById(HOST_ID)) {
+                        if (w.__qaToggleMode()) return true;
+                    }
+                } catch (e) { continue; }   // 교차출처 - 건너뛴다
+            }
+        } catch (e) { /* 무시 */ }
+        return false;
+    }
+
+    /* 같은 출처 부모가 툴바를 가졌으면 부모를 토글한다.
+     * ★셸 구조에서 사람이 iframe 안을 한 번 클릭하면 포커스가 그 문서로 옮겨간다.
+     *   그 뒤 Esc 는 iframe 이 받는데 툴바는 최상위에 있을 수 있다 - 위로도 넘겨야
+     *   한다(실측: 아래로만 넘겨서 Esc 가 안 먹었다). */
+    function toggleParent() {
+        try {
+            if (window.top === window.self) return false;
+            var w = window.parent;
+            void w.location.href;                 // 교차출처면 여기서 throw
+            if (typeof w.__qaToggleMode === 'function' &&
+                w.document.getElementById(HOST_ID)) {
+                return !!w.__qaToggleMode();
+            }
+        } catch (e) { /* 교차출처 - 넘길 수 없다 */ }
+        return false;
+    }
+
     function pageModalOpen() {
         try {
             if (topmostModalDialog()) return true;
@@ -332,7 +376,17 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
          *     (모달 위에서 모드를 끄려면 툴바 [나가기] 를 쓴다 - 사용법 3절). */
         document.addEventListener('keydown', function (e) {
             if (e.key !== 'Escape') return;
-            if (!mounted()) return;
+            /* ★내 문서에 툴바가 없어도 빠져나가지 않는다. 셸 구조에서는 툴바가 내용
+             *   iframe 에 있고 Esc 는 포커스된(보통 최상위) 문서가 받는다 - 여기서 물러나면
+             *   Esc 로 모드를 켤 수 없다(실측: 위임 코드는 멀쩡한데 여기서 막혀 있었다). */
+            if (!mounted()) {
+                if (pageModalOpen()) return;    // 모달 닫기가 우선
+                if (toggleChild() || toggleParent()) {
+                    e.stopPropagation();
+                    e.preventDefault();
+                }
+                return;
+            }
             if (modeOn()) {
                 if (!pageModalOpen()) return;   // 평소대로 agentation 이 모드를 끈다
                 e.stopPropagation();
@@ -342,12 +396,18 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
                 return;
             }
             if (pageModalOpen()) return;         // 모달 닫기가 우선
-            var btn = toggleButton();
-            if (!btn) return;
-            e.stopPropagation();
-            e.preventDefault();
-            btn.click();
-            if (window.console) console.info('[화면주석] Esc 로 주석 모드를 켰습니다.');
+            if (turnOn()) {
+                e.stopPropagation();
+                e.preventDefault();
+                if (window.console) console.info('[화면주석] Esc 로 주석 모드를 켰습니다.');
+                return;
+            }
+            /* 내 문서에 툴바가 없다 = 셸 구조에서 툴바가 내용 iframe 에 있다.
+             * Esc 는 포커스된 문서만 받으므로, 같은 출처 자식에게 대신 넘긴다. */
+            if (toggleChild()) {
+                e.stopPropagation();
+                e.preventDefault();
+            }
         }, true);
 
         /* ★②native <dialog> 는 페이지가 아니라 브라우저가 닫는다(close request).
@@ -416,7 +476,10 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
                 e.preventDefault();
                 return;
             }
-            e.stopPropagation();                // 두 번째 클릭만 선택으로 넘긴다
+            // 두 번째 클릭만 선택으로 넘긴다. ★기본 동작도 막아야 한다 -
+            // stopPropagation 만 하면 href="#" 링크가 실제로 눌려 주소에 해시가 붙었다(실측).
+            e.preventDefault();
+            e.stopPropagation();
         }, true);
     }
 
@@ -533,6 +596,38 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
             toggleFound: !!toggleButton(),
             stats: topStats
         };
+    };
+
+    /* 프로그램이 설정을 바꿨을 때 다시 붙이기 위한 것. __qaClear 와 달리
+     * 저장된 주석을 지우지 않는다 - 스위치를 켜다가 주석을 잃으면 안 된다. */
+    /* 이 문서의 툴바를 토글한다. 부모 문서가 자식 프레임을 대신 켜 줄 때 쓴다 -
+     * 셸 구조에서는 툴바가 iframe 에 있는데 Esc 는 포커스된 문서만 받는다(실측). */
+    window.__qaToggleMode = function () {
+        return turnOn();
+    };
+
+    /* 모드를 켠다. ★툴바가 등장 애니메이션 중이면 클릭이 안 먹는 경우가 있다(실측:
+     * Esc 를 눌렀는데 아무 일도 안 일어남). 사람이 두 번 누르지 않게 한 번만 더 시도한다. */
+    function turnOn() {
+        var btn = toggleButton();
+        if (!btn) return false;
+        btn.click();
+        setTimeout(function () {
+            try {
+                if (modeOn()) return;
+                var b2 = toggleButton();
+                if (b2) b2.click();
+            } catch (e) { /* 무시 */ }
+        }, 320);
+        return true;
+    }
+
+    window.__qaRemount = function () {
+        try {
+            unmount();
+            mount();
+        } catch (e) { /* 무시 */ }
+        return mounted();
     };
 
     window.__qaClear = function () {

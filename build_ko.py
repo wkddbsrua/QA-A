@@ -95,6 +95,24 @@ def main():
         s = s.replace(find, ko)
         applied += 1
 
+    # ── 동작 기본값 치환(patches) ──────────────────────────────
+    # 번역이 아니다. 그래서 rules 와 섞지 않고 따로 센다 - 표의 뜻이 흐려지면
+    # 다음 사람이 "이게 번역인가 코드인가" 를 매번 다시 판단해야 한다.
+    patches = table.get('patches') or []
+    p_missed, p_mismatch, p_applied = [], [], 0
+    for r in patches:
+        find, to = r['find'], r['to']
+        want = r.get('count', 1)
+        n = s.count(find)
+        if n == 0:
+            p_missed.append(find)
+            continue
+        if n != want:
+            p_mismatch.append('%s → %d곳 (기대 %d)' % (find, n, want))
+            continue
+        s = s.replace(find, to)
+        p_applied += 1
+
     left = scan_leftover(s, exact, pats)
 
     if not os.path.isdir(DST_DIR):
@@ -103,11 +121,13 @@ def main():
 
     print('한글 사본: %s (%.0f KB)' % (DST, os.path.getsize(DST) / 1024.0))
     print('  치환         %d / %d' % (applied, len(rules)))
-    print('  못 찾음      %d' % len(missed))
-    print('  개수 불일치  %d' % len(mismatch))
+    print('  동작 패치     %d / %d' % (p_applied, len(patches)))
+    print('  못 찾음      %d' % (len(missed) + len(p_missed)))
+    print('  개수 불일치  %d' % (len(mismatch) + len(p_mismatch)))
     print('  잔존 영문 UI %d' % len(left))
 
-    for label, items in (('못 찾음', missed), ('개수 불일치', mismatch)):
+    for label, items in (('못 찾음', missed + p_missed),
+                        ('개수 불일치', mismatch + p_mismatch)):
         if items:
             print('\n[%s]' % label)
             for i in items:
@@ -117,7 +137,8 @@ def main():
         for t in sorted(left):
             print('  · "%s" (%d곳)' % (t, left[t]))
 
-    bad = len(missed) + len(mismatch) + len(left)
+    bad = (len(missed) + len(mismatch) + len(left)
+           + len(p_missed) + len(p_mismatch))
     if bad:
         print('\n실패 — 위 %d건을 처리해야 통과다.' % bad)
         return 1
