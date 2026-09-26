@@ -609,6 +609,101 @@ class Launcher(object):
                     continue
         return total
 
+    def paste_into(self, url, text):
+        """이슈 화면을 열고 댓글 편집기에 내용을 채워 넣는다. 등록은 사람이 한다(프6·7).
+
+        ★API 토큰을 쓰지 않는다. 우리가 띄운 브라우저에 사람이 이미 로그인해 두었으므로
+          그 세션을 그대로 쓴다 - 토큰 보관 문제가 없고, 마지막 [등록] 을 사람이 누르니
+          오발송도 없다.
+        ★못 채워도 실패가 아니다. 클립보드에 담아 두고 "붙여넣고 등록하세요" 로 안내한다
+          (지라 댓글 편집기는 리치 텍스트라 화면마다 다르다 - 자동 채움을 보장하지 않는다).
+
+        돌려주는 값: {'navigated': bool, 'filled': bool, 'kind': 'textarea'|'rich'|None}
+        """
+        out = {'navigated': False, 'filled': False, 'kind': None}
+        if not (self.cdp and not self.cdp.closed):
+            return out
+        s = self._wait_page()
+        if s is None:
+            return out
+        try:
+            self.cdp.call('Page.navigate', {'url': url}, session_id=s.sid, timeout=15)
+            out['navigated'] = True
+        except Exception:
+            return out
+
+        # 편집기를 찾는다(로그인·로딩을 기다려야 하므로 몇 번 본다)
+        find = ("(function(){"
+                "var sel='textarea:not([readonly]):not([disabled]),"
+                "[contenteditable=\"true\"],[role=\"textbox\"]';"
+                "var els=document.querySelectorAll(sel);"
+                "for(var i=0;i<els.length;i++){var e=els[i],r=e.getBoundingClientRect();"
+                "if(r.width<120||r.height<24)continue;"
+                "var st=getComputedStyle(e);"
+                "if(st.display==='none'||st.visibility==='hidden')continue;"
+                "e.scrollIntoView({block:'center'});"
+                "try{e.focus();}catch(x){}"
+                "return {kind:(e.tagName==='TEXTAREA'?'textarea':'rich'),"
+                "x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};}"
+                "return null;})()")
+        hit = None
+        for _ in range(24):                    # 최대 ~12초
+            time.sleep(0.5)
+            try:
+                r = self.cdp.call('Runtime.evaluate',
+                                  {'expression': find, 'returnByValue': True},
+                                  session_id=s.sid, timeout=8)
+                hit = (r.get('result') or {}).get('value')
+            except Exception:
+                hit = None
+            if hit:
+                break
+        if not hit:
+            return out
+        out['kind'] = hit.get('kind')
+        try:
+            # 포커스를 확실히 하려고 실제로 한 번 누른다(리치 편집기는 클릭으로 열린다)
+            for kind in ('mousePressed', 'mouseReleased'):
+                self.cdp.call('Input.dispatchMouseEvent',
+                              {'type': kind, 'x': hit['x'], 'y': hit['y'],
+                               'button': 'left', 'clickCount': 1,
+                               'buttons': 1 if kind == 'mousePressed' else 0},
+                              session_id=s.sid, timeout=8)
+            time.sleep(0.4)
+            self._type_text(s.sid, text, out['kind'])
+            time.sleep(0.4)
+            chk = ("(function(){var e=document.activeElement;if(!e)return 0;"
+                   "var v=(e.value!==undefined?e.value:e.textContent)||'';"
+                   "return v.length;})()")
+            r = self.cdp.call('Runtime.evaluate', {'expression': chk, 'returnByValue': True},
+                              session_id=s.sid, timeout=8)
+            n = (r.get('result') or {}).get('value') or 0
+            out['filled'] = bool(n and n > 20)
+        except Exception:
+            pass
+        return out
+
+    def _type_text(self, sid, text, kind):
+        """편집기에 내용을 넣는다.
+
+        ★리치 텍스트(contenteditable)에서는 insertText 한 번으로 넣으면 **줄바꿈이
+          사라진다**(실측: 66자 문서가 59자로 - 개행 7개가 없어졌다). 문서가 한 덩이로
+          붙어 버리므로, 줄 단위로 넣고 사이에 Enter 를 눌러 준다."""
+        lines = str(text or '').split(chr(10))
+        if kind != 'rich':
+            self.cdp.call('Input.insertText', {'text': text}, session_id=sid, timeout=30)
+            return
+        for i, line in enumerate(lines):
+            if i:
+                for t in ('keyDown', 'keyUp'):
+                    self.cdp.call('Input.dispatchKeyEvent',
+                                  {'type': t, 'key': 'Enter', 'code': 'Enter',
+                                   'windowsVirtualKeyCode': 13, 'nativeVirtualKeyCode': 13,
+                                   'text': chr(13) if t == 'keyDown' else ''},
+                                  session_id=sid, timeout=8)
+            if line:
+                self.cdp.call('Input.insertText', {'text': line}, session_id=sid, timeout=10)
+
     def rearrange_count(self):
         """레이아웃 모드에서 바꾼 개수를 센다(브9).
 

@@ -806,10 +806,14 @@ class Store(object):
         self._reload()
         return added, self.counts()
 
-    def export(self, dest_path):
-        """현재 내용을 파일로 저장한 뒤 비운다. 저장이 실패하면 원본을 보존한다."""
+    def export(self, dest_path, text=None):
+        """현재 내용을 파일로 저장한 뒤 비운다. 저장이 실패하면 원본을 보존한다.
+
+        text 를 주면 그것을 그대로 쓴다 - 사람이 '저장 전 확인' 창에서 고친 내용이다(프7).
+        주지 않으면 지금 상태로 렌더한다."""
         with self.lock:
-            text = self.render()
+            if text is None:
+                text = self.render()
             with io.open(dest_path, 'w', encoding='utf-8') as f:
                 f.write(text)
             self.reset(keep_archive=True)

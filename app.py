@@ -20,7 +20,7 @@ import traceback
 from datetime import datetime
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import launcher as L
 from store import Store, PRIORITIES, PRIORITY_LABEL
@@ -927,14 +927,117 @@ class App(tk.Tk):
         self.wait_window(win)
         return out['ok']
 
+    def preview_text(self, title, action_label):
+        """결과 문서를 보여 주고 고칠 기회를 준다(프7). 확정한 텍스트 또는 None.
+
+        총평을 먼저 묻고, 그 결과가 반영된 문서 전문을 띄운다."""
+        if not self.ask_closing():
+            return None
+        text = self.store.render()
+        f = self.ui_font
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.configure(bg='#ffffff')
+        win.transient(self)
+        win.grab_set()
+        win.geometry('900x720')
+
+        tk.Label(win, bg='#ffffff', font=(f, 11, 'bold'), anchor='w',
+                 text='보내기 전에 확인하세요').pack(fill='x', padx=16, pady=(16, 2))
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
+                 text='여기서 고친 내용은 이번 %s 에만 반영됩니다 — 목록은 그대로 남습니다.'
+                      % action_label).pack(fill='x', padx=16)
+
+        wrap = tk.Frame(win, bg='#ffffff')
+        wrap.pack(fill='both', expand=True, padx=16, pady=(8, 0))
+        txt = tk.Text(wrap, font=(self.mono_font, 9), relief='solid', bd=1, wrap='none',
+                      undo=True)
+        ysb = ttk.Scrollbar(wrap, orient='vertical', command=txt.yview)
+        xsb = ttk.Scrollbar(win, orient='horizontal', command=txt.xview)
+        txt.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+        txt.insert('1.0', text)
+        txt.pack(side='left', fill='both', expand=True)
+        ysb.pack(side='right', fill='y')
+        xsb.pack(fill='x', padx=16)
+
+        info = tk.StringVar()
+
+        def count_lines():
+            body = txt.get('1.0', 'end-1c')
+            info.set('%d줄 · %d자' % (body.count('\n') + 1, len(body)))
+        count_lines()
+        txt.bind('<KeyRelease>', lambda _e: count_lines())
+
+        out = {'text': None}
+
+        def confirm():
+            out['text'] = txt.get('1.0', 'end-1c')
+            win.destroy()
+
+        def to_issue():
+            """이슈 화면을 열고 댓글칸을 채운다. ★등록은 사람이 누른다.
+
+            API 토큰을 쓰지 않는다 - 이 브라우저에 사람이 이미 로그인해 두었으므로
+            그 세션을 그대로 쓴다. 토큰 보관 문제가 없고 오발송도 없다.
+            못 채워도 실패가 아니다: 클립보드에 담아 두고 붙여넣도록 안내한다
+            (지라 댓글 편집기는 리치 텍스트라 화면마다 다르다 - 자동 채움을 보장하지 않는다)."""
+            body = txt.get('1.0', 'end-1c')
+            url = simpledialog.askstring(
+                '이슈 주소',
+                '댓글을 남길 이슈 주소를 넣으세요.\n(등록은 열린 화면에서 직접 누르시면 됩니다)',
+                initialvalue=(self.settings.get('issue_url') or ''), parent=win) or ''
+            url = url.strip()
+            if not url:
+                return
+            self.settings['issue_url'] = url
+            self.save_settings()
+            set_clipboard(body)              # 자동 채움이 실패해도 붙여넣을 수 있게
+            if not (self.launcher and self.launcher.alive() and self.launcher.cdp):
+                messagebox.showinfo(
+                    '브라우저가 없습니다',
+                    '내용을 클립보드에 담았습니다.\n'
+                    '[QA 시작] 으로 브라우저를 열고 이슈 화면에서 붙여넣으세요.', parent=win)
+                return
+            res = self.launcher.paste_into(url, body)
+            if res.get('filled'):
+                self.log('이슈 화면을 열고 댓글칸을 채웠습니다 - 확인한 뒤 [등록] 을 누르세요.')
+                messagebox.showinfo(
+                    '채워 넣었습니다',
+                    '브라우저에서 내용을 확인한 뒤 직접 [등록] 을 누르세요.\n\n'
+                    '자동으로 등록하지 않습니다.', parent=win)
+            elif res.get('navigated'):
+                self.log('이슈 화면을 열었습니다. 댓글칸에 붙여넣어 주세요(클립보드에 담아 두었습니다).')
+                messagebox.showinfo(
+                    '붙여넣어 주세요',
+                    '이슈 화면을 열었습니다.\n'
+                    '댓글칸을 누르고 Ctrl+V 로 붙여넣은 뒤 [등록] 을 누르세요.\n\n'
+                    '내용은 클립보드에 담아 두었습니다.', parent=win)
+            else:
+                messagebox.showinfo(
+                    '열지 못했습니다',
+                    '이슈 화면을 열지 못했습니다.\n'
+                    '내용은 클립보드에 담아 두었으니 직접 붙여넣어 주세요.', parent=win)
+
+        bar = tk.Frame(win, bg='#ffffff')
+        bar.pack(fill='x', padx=16, pady=12)
+        ttk.Label(bar, textvariable=info).pack(side='left')
+        ttk.Button(bar, text='취소', command=win.destroy).pack(side='right')
+        ttk.Button(bar, text=action_label, style='Go.TButton',
+                   command=confirm).pack(side='right', padx=(0, 8))
+        ttk.Button(bar, text='이슈에 올리기 (등록은 직접)',
+                   command=to_issue).pack(side='right', padx=(0, 8))
+        txt.focus_set()
+        self.wait_window(win)
+        return out['text']
+
     def do_copy(self):
         pages, total = self.store.counts()
         if not total:
             messagebox.showinfo('내용 없음', '아직 주석이 없습니다.')
             return
-        if not self.ask_closing():
+        text = self.preview_text('복사 전 확인', '복사')
+        if text is None:
             return
-        text = self.store.render()
         if set_clipboard(text):
             self.log('클립보드로 복사 - 화면 %d개 · 주석 %d건 (창을 닫아도 유지됩니다)'
                      % (pages, total))
@@ -957,7 +1060,8 @@ class App(tk.Tk):
         if not total:
             messagebox.showinfo('내용 없음', '아직 주석이 없습니다.')
             return
-        if not self.ask_closing():
+        text = self.preview_text('저장 전 확인', '저장')
+        if text is None:
             return
         default = '화면주석-%s.md' % datetime.now().strftime('%Y%m%d-%H%M')
         path = filedialog.asksaveasfilename(
@@ -966,7 +1070,7 @@ class App(tk.Tk):
         if not path:
             return
         try:
-            self.store.export(path)
+            self.store.export(path, text=text)      # 확인·수정한 그 내용을 저장한다
         except Exception as e:
             # 저장이 실패하면 목록을 지우지 않는다(잃는 것보다 중복이 낫다).
             messagebox.showerror('저장 실패', '%s\n\n목록은 그대로 두었습니다.' % e)
