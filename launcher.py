@@ -607,6 +607,38 @@ class Launcher(object):
                     continue
         return total
 
+    def rearrange_count(self):
+        """레이아웃 모드에서 바꾼 개수를 센다(브9).
+
+        agentation 은 배치 변경을 `agentation-rearrange-<경로>` 로 저장한다.
+        주석 모드에 있으면 그 개수가 화면에 안 보여서 "내가 몇 개 바꿨지" 를 알 수 없다는
+        실사용 보고가 있었다. 프로그램 창이 대신 보여 준다."""
+        expr = ('(function(){var n=0;try{'
+                'for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);'
+                'if(!k||k.indexOf("agentation-rearrange-")!==0)continue;'
+                'var v=null;try{v=JSON.parse(localStorage.getItem(k));}catch(e){}'
+                'if(Array.isArray(v))n+=v.length;'
+                'else if(v&&typeof v==="object")n+=Object.keys(v).length;'
+                'else n+=1;}}catch(e){}return n;})()')
+        total = 0
+        for s in list(self.sessions.values()):
+            if s.type not in ('page', 'iframe'):
+                continue
+            ctxs = list(s.contexts.values()) or [None]
+            for ctx in ctxs:
+                params = {'expression': expr, 'returnByValue': True}
+                if ctx is not None:
+                    params['contextId'] = ctx
+                try:
+                    r = self.cdp.call('Runtime.evaluate', params, session_id=s.sid, timeout=5)
+                    v = (r.get('result') or {}).get('value')
+                    if isinstance(v, (int, float)):
+                        total += int(v)
+                        break            # 한 타깃에서 한 번만 센다(프레임마다 같은 저장소)
+                except Exception:
+                    continue
+        return total
+
     def check_injected(self):
         """툴바가 뜬 탭 수. 사람이 눈으로 "떴나?" 확인하지 않게 프로그램이 스스로 본다.
 

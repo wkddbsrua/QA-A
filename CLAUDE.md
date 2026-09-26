@@ -28,6 +28,13 @@ top layer(`popover`) 로 올라가고, native 모달이 열리면 그 `<dialog>`
 "그림을 보내 달라" 가 나오면 **텍스트를 고친다** — 색 기준·묶음 기하(정렬·간격)·배치 속성·
 기대·우선순위·항목 목차가 그 답이다(README 참조).
 
+## 클릭·Esc 정책 (실사용자 요구로 정해진 것)
+요소 선택은 **더블클릭**, 모드 토글은 **Esc**, 주석 모드에서 페이지는 클릭을 **전혀** 못 받는다.
+구현은 `src/inject.jsx` 의 캡처단계 리스너 하나에 모여 있다 —
+`stopImmediatePropagation`(첫 클릭, agentation 까지 차단)과 `stopPropagation`(두 번째, 페이지만 차단)을
+나눠 쓰는 것이 핵심이다. **우리 리스너가 agentation 보다 먼저 등록된다는 전제**가 깨지면 둘 다 깨진다.
+모달이 열려 있으면 Esc 로 모드를 켜지 않는다(그 Esc 는 모달을 닫는 것이다).
+
 ## 진단 규칙
 "안 되는데?" 를 들으면 추측하지 말고 **그 브라우저에 CDP 로 붙어 DOM 을 본다** —
 `document.__qaDoc` · `window.__qaInjected` · `window.__qaReady` · `<style>` 개수 ·

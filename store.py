@@ -192,6 +192,10 @@ class Store(object):
         # aid -> {'note': str, 'refs': [aid…], 'expected': str, 'priority': ''|high|mid|low}
         self.meta = {}
         self.closing = u''              # 총평(추출·복사 때 사람이 적는 마지막 코멘트)
+        # 되돌리기: 무시할 이벤트 줄 번호(0-based). 과거 줄을 고치지 않는다.
+        self.skip = set()
+        # 사람이 정한 주석 순서. key -> [aid…] (없으면 들어온 순서)
+        self.order = {}
         self._replaying = False
 
     # ── 화면 ──────────────────────────────────────────────────
@@ -199,6 +203,47 @@ class Store(object):
     def key_of(url, viewport):
         """화면 키 = (주소, 해상도). 해상도를 모르면 '?' 로 둔다(합치지는 않는다)."""
         return (url or '', viewport or '?')
+
+    def _ordered(self, key, anns):
+        """사람이 정한 순서가 있으면 그 순서로. 없거나 빠진 것은 뒤에 원래 순서로 붙인다."""
+        want = self.order.get(key)
+        if not want:
+            return list(anns.items())
+        out, seen = [], set()
+        for aid in want:
+            if aid in anns:
+                out.append((aid, anns[aid]))
+                seen.add(aid)
+        for aid, a in anns.items():
+            if aid not in seen:
+                out.append((aid, a))
+        return out
+
+    def set_order(self, key, ids):
+        """화면 안 주석 순서를 사람이 정한다(프4)."""
+        with self.lock:
+            self.order[key] = list(ids)
+            if not self._replaying:
+                self._append_jsonl({'t': 'order', 'url': key[0], 'viewport': key[1],
+                                    'ids': list(ids)})
+                self.write_md()
+
+    def move_annotation(self, key, aid, delta):
+        """주석 하나를 위/아래로 옮긴다. 옮긴 뒤 순서를 돌려준다."""
+        with self.lock:
+            p = self.pages.get(key)
+            if not p:
+                return None
+            ids = [k for k, _ in self._ordered(key, p['annotations'])]
+            if aid not in ids:
+                return None
+            i = ids.index(aid)
+            j = max(0, min(len(ids) - 1, i + delta))
+            if i == j:
+                return ids
+            ids.insert(j, ids.pop(i))
+        self.set_order(key, ids)
+        return ids
 
     def _page(self, key):
         p = self.pages.get(key)
@@ -331,7 +376,8 @@ class Store(object):
             #   결과 문서의 [화면 2] 가 어긋나 연결을 못 읽는다.
             for i, p in enumerate(self._render_pages(), 1):
                 anns = []
-                for j, (aid, a) in enumerate(p['annotations'].items(), 1):
+                key = self.key_of(p['url'], p['viewport'])
+                for j, (aid, a) in enumerate(self._ordered(key, p['annotations']), 1):
                     m = self.meta.get(aid) or {}
                     anns.append({
                         'aid': aid, 'no': j,
@@ -355,7 +401,8 @@ class Store(object):
         out = []
         with self.lock:
             for i, p in enumerate(self._render_pages(), 1):
-                for j, (aid, a) in enumerate(p['annotations'].items(), 1):
+                key = self.key_of(p['url'], p['viewport'])
+                for j, (aid, a) in enumerate(self._ordered(key, p['annotations']), 1):
                     out.append({
                         'aid': aid, 'screen': i, 'no': j,
                         'title': p['title'] or u'(제목 없음)', 'vp': p['viewport'],
@@ -431,7 +478,8 @@ class Store(object):
           화면 순서가 바뀌는 순간(되돌아온 화면·해상도 변경) 참조가 어긋난다."""
         idx = {}
         for i, p in enumerate(pages, 1):
-            for j, (aid, a) in enumerate(p['annotations'].items(), 1):
+            key = self.key_of(p['url'], p['viewport'])
+            for j, (aid, a) in enumerate(self._ordered(key, p['annotations']), 1):
                 idx[aid] = (i, j, a.get('element') or u'?', a.get('comment') or u'')
         return idx
 
@@ -440,24 +488,32 @@ class Store(object):
 
         ★SC-295 인계 문서의 QA 요청 ④: 댓글이 "첨부하였습니다" 한 줄이라 이슈 검색·추적에
           안 걸렸다. 문서 맨 앞에 제목 줄이 있으면 그걸 그대로 붙이면 된다."""
-        rows = []
-        n = 0
+        # 어디부터 볼지가 목차에서 보이게 한다.
+        # ★미지정을 '낮음' 보다 앞에 둔다 - '낮음' 은 나중에 해도 된다고 사람이 판단한
+        #   것이고, 미지정은 아직 판단이 안 된 것이라 눈에 띄어야 한다.
+        rank = {'high': 0, 'mid': 1, '': 2, 'low': 3}
+        items = []
         for i, p in enumerate(pages, 1):
-            for j, (aid, a) in enumerate(p['annotations'].items(), 1):
-                n += 1
+            key = self.key_of(p['url'], p['viewport'])
+            multi = len(p['annotations']) > 1
+            for j, (aid, a) in enumerate(self._ordered(key, p['annotations']), 1):
                 m = self.meta.get(aid) or {}
-                pr = PRIORITY_LABEL.get(m.get('priority') or '', u'')
-                memo = (a.get('comment') or u'').replace(u'\n', u' ').strip()
-                if len(memo) > 60:
-                    memo = memo[:60] + u'…'
-                rows.append(u'%d. [화면 %d] %s%s — %s%s'
-                            % (n, i, a.get('element') or u'?',
-                               u' %d번' % j if len(p['annotations']) > 1 else u'',
-                               memo or u'(메모 없음)',
-                               u'  *(%s)*' % pr if pr else u''))
-        if not rows:
+                items.append((rank.get(m.get('priority') or '', 3), i, j, aid, a,
+                              m.get('priority') or ''))
+        if not items:
             return []
-        return [u'## 항목 %d건' % n, u''] + rows + [u'']
+        items.sort(key=lambda x: (x[0], x[1], x[2]))
+        rows = []
+        for n, (_r, i, j, aid, a, prio) in enumerate(items, 1):
+            pr = PRIORITY_LABEL.get(prio, u'')
+            memo = (a.get('comment') or u'').replace(u'\n', u' ').strip()
+            if len(memo) > 60:
+                memo = memo[:60] + u'…'
+            rows.append(u'%d. [화면 %d] %d번 %s — %s%s'
+                        % (n, i, j, a.get('element') or u'?',
+                           memo or u'(메모 없음)',
+                           u'  *(%s)*' % pr if pr else u''))
+        return [u'## 항목 %d건 (우선순위순)' % len(items), u''] + rows + [u'']
 
     def _back_refs(self):
         """연결의 반대 방향. 어느 쪽 주석을 읽어도 관계가 보이려면 필요하다."""
@@ -501,8 +557,9 @@ class Store(object):
                 if p['referrer']:
                     lines.append(u'- 이전 화면: %s' % p['referrer'])
                 lines += [u'- 주석 %d건' % len(p['annotations']), u'']
-                lines += self._render_annotations(list(p['annotations'].items()),
-                                                  refidx, backidx)
+                lines += self._render_annotations(
+                    self._ordered(self.key_of(p['url'], p['viewport']), p['annotations']),
+                    refidx, backidx)
                 lines += self._render_noise(p)
             return u'\n'.join(lines)
 
@@ -594,39 +651,129 @@ class Store(object):
         with self.lock:
             self._replaying = True
             try:
-                with io.open(self.jsonl_path, encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
+                # ★두 번 읽는다. 첫 바퀴에서 'skip' 을 모아 두지 않으면 그보다 앞선
+                #   줄을 이미 반영한 뒤라 무시할 수 없다.
+                raw = self._read_events()
+                # ★'skip'(되돌리기)을 먼저 모은다. 한 바퀴로 하면 그보다 앞선 줄을
+                #   이미 반영한 뒤라 무시할 수 없다.
+                for rec in raw:
+                    if rec and rec.get('t') == 'skip':
                         try:
-                            rec = json.loads(line)
+                            self.skip.add(int(rec.get('index')))
                         except Exception:
-                            continue
-                        t = rec.get('t')
-                        if t == 'annotation':
-                            self.apply(rec.get('payload') or {}, persist=False)
-                        elif t == 'console':
-                            self.add_console(self.key_of(rec.get('url'), rec.get('viewport')),
-                                             rec.get('text'), rec.get('level') or 'error')
-                        elif t == 'network':
-                            self.add_network(self.key_of(rec.get('url'), rec.get('viewport')),
-                                             rec.get('request'), rec.get('status'),
-                                             rec.get('reason') or '')
-                        elif t == 'merge':
-                            self.merge_unknown(rec.get('url'), rec.get('viewport'))
-                        elif t == 'meta':
-                            self.set_meta(rec.get('aid'), rec.get('note') or u'',
-                                          rec.get('refs') or [],
-                                          rec.get('expected') or u'',
-                                          rec.get('priority') or u'')
-                        elif t == 'closing':
-                            self.set_closing(rec.get('text') or u'')
-                        # 모르는 t 는 무시한다 - 옛 파일과 앞으로의 확장 양쪽을 위해.
+                            pass
+                for i, rec in enumerate(raw):
+                    if rec is None or i in self.skip:
+                        continue
+                    t = rec.get('t')
+                    if t == 'annotation':
+                        self.apply(rec.get('payload') or {}, persist=False)
+                    elif t == 'console':
+                        self.add_console(self.key_of(rec.get('url'), rec.get('viewport')),
+                                         rec.get('text'), rec.get('level') or 'error')
+                    elif t == 'network':
+                        self.add_network(self.key_of(rec.get('url'), rec.get('viewport')),
+                                         rec.get('request'), rec.get('status'),
+                                         rec.get('reason') or '')
+                    elif t == 'merge':
+                        self.merge_unknown(rec.get('url'), rec.get('viewport'))
+                    elif t == 'meta':
+                        self.set_meta(rec.get('aid'), rec.get('note') or u'',
+                                      rec.get('refs') or [], rec.get('expected') or u'',
+                                      rec.get('priority') or u'')
+                    elif t == 'closing':
+                        self.set_closing(rec.get('text') or u'')
+                    elif t == 'order':
+                        self.set_order(self.key_of(rec.get('url'), rec.get('viewport')),
+                                       rec.get('ids') or [])
+                    # 모르는 t 는 무시한다 - 옛 파일과 앞으로의 확장 양쪽을 위해.
             finally:
                 self._replaying = False
             self.write_md()
             return self.counts()
+
+    # ── 되돌리기 · 지난 기록 ──────────────────────────────────
+    def _read_events(self):
+        if not os.path.exists(self.jsonl_path):
+            return []
+        out = []
+        with io.open(self.jsonl_path, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    out.append(None)
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    out.append(None)
+        return out
+
+    def undoable(self):
+        """되돌릴 수 있는 마지막 파괴적 이벤트를 찾는다. (줄번호, 설명) 또는 None."""
+        evs = self._read_events()
+        for i in range(len(evs) - 1, -1, -1):
+            if i in self.skip or not evs[i]:
+                continue
+            rec = evs[i]
+            if rec.get('t') != 'annotation':
+                continue
+            pay = rec.get('payload') or {}
+            kind = pay.get('kind')
+            if kind == 'clear':
+                return i, u'전체 지우기 (%s)' % (pay.get('url') or u'')
+            if kind == 'delete':
+                n = len(pay.get('annotations') or [])
+                return i, u'주석 %d건 삭제 (%s)' % (n, pay.get('url') or u'')
+        return None
+
+    def undo(self):
+        """마지막 지우기를 취소한다. 되살린 주석 수를 돌려준다.
+
+        ★과거 줄을 고치지 않는다. '이 줄은 무시' 를 덧붙이고 전체를 다시 재생한다 -
+          원본 기록이 증거이기 때문이다."""
+        hit = self.undoable()
+        if not hit:
+            return 0
+        idx, _desc = hit
+        before = self.counts()[1]
+        with self.lock:
+            self._append_jsonl({'t': 'skip', 'index': idx})
+            self.skip.add(idx)
+        self._reload()
+        return self.counts()[1] - before
+
+    def _reload(self):
+        """인메모리 상태를 기록에서 다시 만든다(skip 을 반영)."""
+        with self.lock:
+            self.pages.clear()
+            self.meta.clear()
+            self.order.clear()
+            self.closing = u''
+            keep = set(self.skip)
+            self.skip.clear()
+            self.replay()
+            self.skip |= keep
+
+    def load_archive(self, path):
+        """지난 기록(archive 의 jsonl)을 현재 목록에 합친다(프5).
+
+        ★현재 기록에 '합친다'. 따로 보관하면 진실이 두 곳이 되고, 그다음 추출에서
+          무엇이 들어갔는지 사람이 못 센다."""
+        added = 0
+        with io.open(path, encoding='utf-8') as f:
+            lines = [l.strip() for l in f if l.strip()]
+        with self.lock:
+            for line in lines:
+                try:
+                    json.loads(line)
+                except Exception:
+                    continue
+                with io.open(self.jsonl_path, 'a', encoding='utf-8') as out:
+                    out.write(line + '\n')
+                added += 1
+        self._reload()
+        return added, self.counts()
 
     def export(self, dest_path):
         """현재 내용을 파일로 저장한 뒤 비운다. 저장이 실패하면 원본을 보존한다."""
@@ -657,5 +804,7 @@ class Store(object):
                     pass
             self.pages.clear()
             self.meta.clear()
+            self.order.clear()
+            self.skip.clear()
             self.closing = u''
             self.write_md()

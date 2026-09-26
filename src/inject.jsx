@@ -325,14 +325,29 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
     }
 
     function guardEsc() {
-        /* ①페이지 스크립트가 닫는 모달(div 오버레이 계열) - 전파를 끊는다. */
+        /* ①페이지 스크립트가 닫는 모달(div 오버레이 계열) - 전파를 끊는다.
+         * ②모드가 꺼져 있으면 Esc 로 켠다 - 화면을 옮길 때마다 둥근 버튼을 찾아
+         *   누르는 것이 불편하다는 실사용 보고(브3).
+         *   ★단 모달이 열려 있을 때는 켜지 않는다. 그 Esc 는 모달을 닫으려는 것이다
+         *     (모달 위에서 모드를 끄려면 툴바 [나가기] 를 쓴다 - 사용법 3절). */
         document.addEventListener('keydown', function (e) {
             if (e.key !== 'Escape') return;
-            if (!mounted() || !modeOn() || !pageModalOpen()) return;
-            e.stopPropagation();
-            if (window.console) {
-                console.info('[화면주석] 모달이 열려 있어 Esc 를 페이지로 넘기지 않았습니다.');
+            if (!mounted()) return;
+            if (modeOn()) {
+                if (!pageModalOpen()) return;   // 평소대로 agentation 이 모드를 끈다
+                e.stopPropagation();
+                if (window.console) {
+                    console.info('[화면주석] 모달이 열려 있어 Esc 를 페이지로 넘기지 않았습니다.');
+                }
+                return;
             }
+            if (pageModalOpen()) return;         // 모달 닫기가 우선
+            var btn = toggleButton();
+            if (!btn) return;
+            e.stopPropagation();
+            e.preventDefault();
+            btn.click();
+            if (window.console) console.info('[화면주석] Esc 로 주석 모드를 켰습니다.');
         }, true);
 
         /* ★②native <dialog> 는 페이지가 아니라 브라우저가 닫는다(close request).
@@ -347,6 +362,106 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
                 console.info('[화면주석] 주석 모드라서 Esc 로 모달을 닫지 않았습니다.');
             }
         }, true);
+    }
+
+    /* ── 우리 UI 안인가 ─────────────────────────────────────── */
+    function isOurs(el) {
+        try {
+            if (!el || !el.closest) return false;
+            return !!(el.closest('[data-agentation-root]') || el.closest('#' + TOP_ID) ||
+                      el.closest('#' + HOST_ID));
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /* 접힌 둥근 버튼(= 모드 켜기). 툴바 안에서 클릭을 받는 60px 이하 요소가 그것이다.
+     * ★문구(aria-label)로 찾지 않는다 - 한글화 표가 바뀌면 조용히 깨진다. */
+    function toggleButton() {
+        try {
+            var t = document.querySelector('[data-feedback-toolbar]');
+            if (!t) return null;
+            var all = [t].concat([].slice.call(t.querySelectorAll('*')));
+            for (var i = 0; i < all.length; i++) {
+                var e = all[i], r = e.getBoundingClientRect();
+                if (getComputedStyle(e).pointerEvents !== 'auto') continue;
+                if (r.width >= 24 && r.height >= 24 && r.width <= 60) return e;
+            }
+        } catch (e) { /* 무시 */ }
+        return null;
+    }
+
+    /* ── 브2·브8: 클릭 정책 ───────────────────────────────────
+     * · 주석 모드가 꺼져 있으면 아무것도 하지 않는다(페이지가 평소대로 동작).
+     * · 켜져 있으면 페이지는 클릭을 못 받는다 - '페이지 클릭 차단' 설정이
+     *   button·a·input 등 상호작용 태그만 막아서 썸네일(img/div + 위임 핸들러)이
+     *   새어 나가 미리보기가 열렸다(실사용 보고).
+     * · 첫 클릭은 우리도 삼킨다 → 두 번째 클릭(더블클릭)에만 요소가 잡힌다.
+     */
+    function guardClicks() {
+        // 드래그·글자 선택은 mousedown 기반이라 preventDefault 하지 않는다.
+        ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'dblclick', 'auxclick'].forEach(
+            function (type) {
+                document.addEventListener(type, function (e) {
+                    if (!mounted() || !modeOn() || isOurs(e.target)) return;
+                    e.stopPropagation();        // agentation 은 받고 페이지는 못 받는다
+                }, true);
+            });
+
+        document.addEventListener('click', function (e) {
+            if (!mounted() || !modeOn() || isOurs(e.target)) return;
+            if ((e.detail || 1) < 2) {
+                // 첫 클릭: 아무 일도 일어나지 않게 한다(agentation 까지 차단).
+                e.stopImmediatePropagation();
+                e.preventDefault();
+                return;
+            }
+            e.stopPropagation();                // 두 번째 클릭만 선택으로 넘긴다
+        }, true);
+    }
+
+    /* ── 브6: 메모 입력 영역을 2배로 · 팝업을 화면 안으로 ───── */
+    function growPopup() {
+        try {
+            var p = document.querySelector('[data-annotation-popup]');
+            if (!p) return;
+            var ta = p.querySelector('textarea');
+            /* ★한 번만 키운다. 팝업이 닫혔다 '같은 노드' 로 다시 열리면 이미 2배가 된
+             *   크기를 또 2배로 잡아 폭주한다(실측: 280x52 → 1169x456).
+             *   그래서 노드에 표식을 남긴다 - 노드가 살아 있는 동안 상태도 살아 있다. */
+            if (ta && !ta.hasAttribute('data-qa-grown')) {
+                var r = ta.getBoundingClientRect();
+                if (r.width && r.height) {
+                    ta.setAttribute('data-qa-grown', '1');
+                    // 실측값의 2배. 숫자를 박지 않고 그때그때 두 배로 만든다
+                    // (기기·글꼴에 따라 원래 크기가 다르다).
+                    var w = Math.min(Math.round(r.width * 2), window.innerWidth - 80);
+                    var h = Math.min(Math.round(r.height * 2), window.innerHeight - 160);
+                    ta.style.width = w + 'px';
+                    ta.style.height = h + 'px';
+                }
+            }
+            // 커진 팝업이 화면을 벗어나면 안으로 당긴다.
+            // ★'버튼이 아래로 넘어가서 안 눌러진다' 는 실사용 보고가 이 경우다.
+            var pr = p.getBoundingClientRect();
+            var dx = 0, dy = 0;
+            if (pr.right > window.innerWidth - 8) dx = window.innerWidth - 8 - pr.right;
+            if (pr.left + dx < 8) dx += 8 - (pr.left + dx);
+            if (pr.bottom > window.innerHeight - 8) dy = window.innerHeight - 8 - pr.bottom;
+            if (pr.top + dy < 8) dy += 8 - (pr.top + dy);
+            var want = (dx || dy) ? 'translate(' + Math.round(dx) + 'px,' + Math.round(dy) + 'px)'
+                                  : '';
+            if (p.style.transform !== want) p.style.transform = want;
+        } catch (e) { /* 무시 */ }
+    }
+
+    function watchPopup() {
+        try {
+            new MutationObserver(growPopup).observe(document.body, {
+                childList: true, subtree: true
+            });
+        } catch (e) { /* 무시 */ }
+        setInterval(growPopup, 400);            // 관찰이 막히는 문서에서도 되게
     }
 
     /* ── 화면 정보 통지 · 감시 ───────────────────────────────── */
@@ -415,6 +530,7 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
             modalDialogOpen: !!modal,
             pageModalOpen: pageModalOpen(),
             modeOn: modeOn(),
+            toggleFound: !!toggleButton(),
             stats: topStats
         };
     };
@@ -448,6 +564,8 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         watchFrames();
         watchTop();
         guardEsc();
+        guardClicks();
+        watchPopup();
         window.addEventListener('resize', onResize);
     }
 

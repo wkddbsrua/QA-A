@@ -333,6 +333,9 @@ class App(tk.Tk):
         bar.pack(fill='x', pady=(0, 6))
         ttk.Label(bar, textvariable=self.count_text).pack(side='left')
         ttk.Button(bar, text='결과 폴더', command=lambda: self.open_path(OUT_DIR)).pack(side='right')
+        ttk.Button(bar, text='지난 기록', command=self.do_load_archive
+                   ).pack(side='right', padx=(0, 8))
+        ttk.Button(bar, text='되돌리기', command=self.do_undo).pack(side='right', padx=(0, 8))
         ttk.Button(bar, text='비우기 (보관)', command=self.do_reset).pack(side='right', padx=(0, 8))
         ttk.Button(bar, text='추출 (저장 후 삭제)', command=self.do_export).pack(side='right', padx=(0, 8))
         ttk.Button(bar, text='클립보드 복사', command=self.do_copy).pack(side='right', padx=(0, 8))
@@ -343,7 +346,12 @@ class App(tk.Tk):
         self.tree = ttk.Treeview(wrap, columns=cols, show='tree headings', height=11)
         self.tree.column('#0', width=26, minwidth=26, stretch=False)
         self.tree.bind('<Double-1>', self.on_row_open)
+        # 프3: 화면 줄에서 그 주소로 브라우저를 보낸다. 프4: 주석 순서를 옮긴다.
+        self.tree.bind('<Button-3>', self.on_row_menu)
+        self.tree.bind('<Control-Up>', lambda e: self.move_row(-1))
+        self.tree.bind('<Control-Down>', lambda e: self.move_row(1))
         self._tree_sig = None
+        self._menu = tk.Menu(self, tearoff=0)
         # 해상도는 화면 정체성의 일부다(같은 주소라도 해상도가 다르면 다른 줄).
         for key, label, width, anchor in (
                 ('no', '화면', 44, 'center'), ('title', '제목', 190, 'w'),
@@ -473,7 +481,15 @@ class App(tk.Tk):
                 n = self.launcher.check_injected()
             except Exception:
                 n = 0
-            self.post_status(bool(n), '주입됨 (탭 %d)' % n if n else '주입 대기')
+            try:
+                moved = self.launcher.rearrange_count()
+            except Exception:
+                moved = 0
+            # 브9: 레이아웃 모드에서 바꾼 개수를 주석 모드에서도 알 수 있게 한다.
+            label = ('주입됨 (탭 %d)' % n) if n else '주입 대기'
+            if moved:
+                label += ' · 레이아웃 변경 %d' % moved
+            self.post_status(bool(n), label)
             _t.sleep(3)
 
     def refresh(self):
@@ -545,6 +561,119 @@ class App(tk.Tk):
             self.tree.item(iid, open=not self.tree.item(iid, 'open'))
             return
         self.open_annotation(iid[2:])
+
+    def _row_key(self, iid):
+        """화면 줄 iid('p|url|vp')에서 store 키를 되돌린다."""
+        if not iid.startswith('p|'):
+            return None
+        body = iid[2:]
+        i = body.rfind('|')
+        return (body[:i], body[i + 1:]) if i > 0 else None
+
+    def on_row_menu(self, event):
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        self.tree.selection_set(iid)
+        self._menu.delete(0, 'end')
+        if iid.startswith('p|'):
+            key = self._row_key(iid)
+            url = key[0] if key else ''
+            self._menu.add_command(label='이 화면으로 이동',
+                                   command=lambda u=url: self.goto_url(u))
+            self._menu.add_command(label='주소 복사',
+                                   command=lambda u=url: self.copy_text(u))
+        else:
+            aid = iid[2:]
+            self._menu.add_command(label='보강 창 열기',
+                                   command=lambda a=aid: self.open_annotation(a))
+            self._menu.add_separator()
+            self._menu.add_command(label='위로 (Ctrl+↑)', command=lambda: self.move_row(-1))
+            self._menu.add_command(label='아래로 (Ctrl+↓)', command=lambda: self.move_row(1))
+        try:
+            self._menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._menu.grab_release()
+
+    def goto_url(self, url):
+        """프3: 목록의 그 화면으로 브라우저를 보낸다."""
+        if not url:
+            return
+        if not (self.launcher and self.launcher.alive()):
+            messagebox.showinfo('브라우저가 없습니다',
+                                '[QA 시작] 으로 브라우저를 먼저 열어 주세요.')
+            return
+        try:
+            self.launcher.navigate(url)
+            self.log('그 화면으로 이동 - %s' % url)
+        except Exception as e:
+            messagebox.showerror('이동 실패', str(e))
+
+    def copy_text(self, text):
+        if set_clipboard(text or ''):
+            self.log('클립보드로 복사 - %s' % (text or '')[:80])
+
+    def move_row(self, delta):
+        """프4: 같은 화면 안에서 주석 순서를 옮긴다."""
+        sel = self.tree.selection()
+        if not sel or not sel[0].startswith('a|'):
+            return
+        iid = sel[0]
+        aid = iid[2:]
+        key = self._row_key(self.tree.parent(iid))
+        if not key:
+            return
+        if self.store.move_annotation(key, aid, delta) is None:
+            return
+        self._tree_sig = None
+        self._fill_tree()
+        if self.tree.exists(iid):
+            self.tree.selection_set(iid)
+            self.tree.see(iid)
+        self.log('주석 순서를 옮겼습니다.')
+
+    def do_undo(self):
+        """브7: 실수로 지운 것을 되살린다."""
+        hit = self.store.undoable()
+        if not hit:
+            messagebox.showinfo('되돌릴 것이 없습니다',
+                                '지우기·삭제를 한 적이 없거나 이미 다 되돌렸습니다.')
+            return
+        _idx, desc = hit
+        if not messagebox.askyesno('되돌리기', '%s\n\n이 작업을 되돌릴까요?' % desc):
+            return
+        n = self.store.undo()
+        self._tree_sig = None
+        self._fill_tree()
+        # ★브라우저 핀은 되돌아오지 않는다(역방향 경로가 없다). 그 사실을 숨기지 않는다.
+        self.log('되돌렸습니다 - 주석 %d건 복구 (%s). 브라우저의 핀은 복구되지 않습니다.'
+                 % (n, desc))
+        messagebox.showinfo('되돌렸습니다',
+                            '주석 %d건을 목록에 되살렸습니다.\n\n'
+                            '결과 문서에는 바로 반영됩니다.\n'
+                            '브라우저 화면의 핀은 되살아나지 않습니다.' % n)
+
+    def do_load_archive(self):
+        """프5: 추출·비우기 때 보관한 기록을 다시 불러온다."""
+        arch = os.path.join(OUT_DIR, 'archive')
+        path = filedialog.askopenfilename(
+            title='불러올 지난 기록을 고르세요',
+            initialdir=arch if os.path.isdir(arch) else OUT_DIR,
+            filetypes=[('주석 기록', '*.jsonl'), ('모든 파일', '*.*')])
+        if not path:
+            return
+        try:
+            added, (pages, total) = self.store.load_archive(path)
+        except Exception as e:
+            messagebox.showerror('불러오기 실패', str(e))
+            return
+        self._tree_sig = None
+        self._fill_tree()
+        self.log('지난 기록을 합쳤습니다 - %s (%d줄) → 화면 %d개 · 주석 %d건'
+                 % (os.path.basename(path), added, pages, total))
+        messagebox.showinfo('불러왔습니다',
+                            '%s\n\n현재 목록에 합쳤습니다.\n화면 %d개 · 주석 %d건'
+                            % (os.path.basename(path), pages, total))
 
     def open_annotation(self, aid):
         """주석 하나에 보충 메모와 연결을 넣는다.
