@@ -23,7 +23,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import launcher as L
-from store import Store
+from store import Store, PRIORITIES, PRIORITY_LABEL
 
 APP_NAME = '화면 주석 QA'
 RES = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
@@ -516,6 +516,10 @@ class App(tk.Tk):
                                      r['ann'], r['con'], r['net']))
             for a in r['anns']:
                 mark = ''
+                if a.get('priority'):
+                    mark += ' [%s]' % PRIORITY_LABEL[a['priority']]
+                if a.get('expected'):
+                    mark += ' →기대'
                 if a['note']:
                     mark += ' ✎'                    # 보충 메모가 있다
                 if a['refs']:
@@ -562,7 +566,7 @@ class App(tk.Tk):
         win.title('주석 보강 — [화면 %d] %d번' % (info['screen'], info['no']))
         win.configure(bg='#ffffff')
         win.transient(self)
-        win.geometry('620x560')
+        win.geometry('620x720')
         pad = {'padx': 16}
 
         tk.Label(win, bg='#ffffff', font=(f, 11, 'bold'), anchor='w',
@@ -578,6 +582,26 @@ class App(tk.Tk):
         ro.insert('1.0', info['comment'] or '(메모 없음)')
         ro.configure(state='disabled')
         ro.pack(fill='x', **pad)
+
+        # ── 우선순위 · 기대 ──
+        row = tk.Frame(win, bg='#ffffff')
+        row.pack(fill='x', pady=(14, 0), **pad)
+        tk.Label(row, bg='#ffffff', font=(f, 10, 'bold'), text='우선순위').pack(side='left')
+        prio = tk.StringVar(value=meta['priority'])
+        tk.Radiobutton(row, text='미지정', value='', variable=prio, bg='#ffffff',
+                       font=(f, 9), anchor='w').pack(side='left', padx=(10, 0))
+        for code, label in PRIORITIES:
+            tk.Radiobutton(row, text=label, value=code, variable=prio, bg='#ffffff',
+                           font=(f, 9), anchor='w').pack(side='left', padx=(6, 0))
+
+        tk.Label(win, bg='#ffffff', font=(f, 10, 'bold'), anchor='w',
+                 text='기대 (이렇게 되어야 합니다)').pack(fill='x', pady=(12, 2), **pad)
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
+                 text='위 메모가 "현재", 여기가 "기대" 입니다. 받는 사람이 되묻지 않게 나눠 적습니다.'
+                 ).pack(fill='x', **pad)
+        expected = tk.Text(win, height=3, font=(f, 10), relief='solid', bd=1, wrap='word')
+        expected.insert('1.0', meta['expected'])
+        expected.pack(fill='x', **pad)
 
         tk.Label(win, bg='#ffffff', font=(f, 10, 'bold'), anchor='w',
                  text='보충 메모').pack(fill='x', pady=(14, 2), **pad)
@@ -654,10 +678,13 @@ class App(tk.Tk):
         redraw()
 
         def save():
-            self.store.set_meta(aid, note.get('1.0', 'end').strip(), refs)
+            self.store.set_meta(aid, note.get('1.0', 'end').strip(), refs,
+                                expected.get('1.0', 'end').strip(), prio.get())
             self._tree_sig = None               # 다음 갱신에서 다시 그리게 한다
-            self.log('주석 보강 저장 - [화면 %d] %d번 (연결 %d건)'
-                     % (info['screen'], info['no'], len(refs)))
+            self.log('주석 보강 저장 - [화면 %d] %d번 (연결 %d건%s%s)'
+                     % (info['screen'], info['no'], len(refs),
+                        ' · 기대' if expected.get('1.0', 'end').strip() else '',
+                        ' · %s' % PRIORITY_LABEL[prio.get()] if prio.get() else ''))
             win.destroy()
 
         bar = tk.Frame(win, bg='#ffffff')

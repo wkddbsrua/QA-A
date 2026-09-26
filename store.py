@@ -17,6 +17,7 @@
 import io
 import json
 import os
+import re
 import threading
 from collections import OrderedDict
 from datetime import datetime
@@ -26,6 +27,131 @@ NOISE_CAP = 50          # 화면당 콘솔 에러·실패 요청 보관 상한(�
 
 def _now():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+# 우선순위는 코드로 저장하고 라벨은 한 곳에서만 만든다(나중에 바꿀 때 한 군데).
+PRIORITIES = [('high', u'높음'), ('mid', u'보통'), ('low', u'낮음')]
+PRIORITY_LABEL = dict(PRIORITIES)
+
+
+def _luma(css_color):
+    """rgb/rgba 문자열의 밝기(0~255). 못 읽으면 None."""
+    try:
+        nums = re.findall(r'[\d.]+', css_color or '')
+        if len(nums) < 3:
+            return None
+        r, g, b = (float(nums[0]), float(nums[1]), float(nums[2]))
+        return 0.299 * r + 0.587 * g + 0.114 * b
+    except Exception:
+        return None
+
+
+def _color_basis(p):
+    """색 지적의 기준을 한 줄로. '다크에서 캡처했는데 라이트 기준으로 본다' 를 막는다.
+
+    ★SC-295 인계 문서의 QA 요청 ①: 첨부의 computed color 가 전부 다크값이었는데
+      그 사실이 결과에 안 적혀 있어 색 지적의 기준이 어긋났다. 강제할 수는 없으니
+      무엇을 보고 있었는지 기록한다."""
+    bg = p.get('bg') or ''
+    scheme = p.get('scheme') or ''
+    prefers = p.get('prefers_dark')
+    if not (bg or scheme or prefers is not None):
+        return None
+    lum = _luma(bg)
+    if lum is not None:
+        tone = u'다크 배경' if lum < 110 else u'라이트 배경'
+    else:
+        tone = u'배경 불명'
+    bits = [tone]
+    if bg:
+        bits.append(bg)
+    if scheme and scheme not in ('normal', 'auto'):
+        bits.append(u'color-scheme: %s' % scheme)
+    if prefers is not None:
+        bits.append(u'브라우저 선호: %s' % (u'다크' if prefers else u'라이트'))
+    return u' · '.join(bits)
+
+
+# 배치를 읽는 데 쓰는 속성. '안쪽으로 옮겨 달라' 류의 지적은 이 값들로 판단한다.
+LAYOUT_KEYS = ('display', 'position', 'flex-direction', 'justify-content', 'align-items',
+               'gap', 'padding', 'margin', 'width', 'height', 'text-align',
+               'grid-template-columns', 'float', 'top', 'left', 'right', 'bottom')
+
+
+def _layout_bits(styles):
+    """computedStyles 에서 배치 관련 속성만 앞으로 뽑는다.
+
+    ★스타일 줄은 300자에서 자른다. 그런데 정작 필요한 padding·gap·정렬 값이 뒤쪽에 있어
+      잘려 나갔다(실측: font-family 목록이 길어 그 뒤가 전부 사라진다)."""
+    got = {}
+    for decl in str(styles or '').split(';'):
+        if ':' not in decl:
+            continue
+        k, v = decl.split(':', 1)
+        k, v = k.strip(), v.strip()
+        if k in LAYOUT_KEYS and v:
+            got[k] = v
+    # 원본 선언 순서가 아니라 LAYOUT_KEYS 순서로 낸다 - 줄이 매번 같은 모양이어야
+    # 사람이 훑어 읽는다(display 다음에 여백·정렬, 크기는 뒤).
+    return [u'%s: %s' % (k, got[k]) for k in LAYOUT_KEYS if k in got]
+
+
+def _nums(boxes, key):
+    out = []
+    for b in boxes:
+        try:
+            out.append(round(float(b.get(key))))
+        except Exception:
+            return []
+    return out
+
+
+def _spread(vals):
+    return (max(vals) - min(vals)) if vals else 0
+
+
+def _geometry_lines(boxes):
+    """묶어 잡은 요소들의 정렬·크기·간격을 숫자로 읽어 준다.
+
+    ★"이 카드 3개 정렬이 안 맞음" 을 그림 없이 전달하려면 숫자여야 한다.
+      스크린샷을 붙이지 않는 것이 이 도구의 존재 이유이므로, 텍스트가 그 일을 해야 한다."""
+    boxes = [b for b in (boxes or []) if isinstance(b, dict)]
+    if len(boxes) < 2:
+        return []
+    lines = [u'- 묶음: 요소 %d개' % len(boxes)]
+
+    lefts = _nums(boxes, 'x')
+    tops = _nums(boxes, 'y')
+    widths = _nums(boxes, 'width')
+    heights = _nums(boxes, 'height')
+    rights = [l + w for l, w in zip(lefts, widths)] if lefts and widths else []
+
+    def axis(label, vals):
+        if not vals:
+            return None
+        d = _spread(vals)
+        if d <= 1:
+            return u'%s %d 일치' % (label, vals[0])
+        return u'%s %s (최대 %dpx 차이)' % (label, u'/'.join(str(v) for v in vals), d)
+
+    align = [x for x in (axis(u'좌', lefts), axis(u'우', rights)) if x]
+    if align:
+        lines.append(u'- 정렬: %s' % u' · '.join(align))
+    size = [x for x in (axis(u'폭', widths), axis(u'높이', heights)) if x]
+    if size:
+        lines.append(u'- 크기: %s' % u' · '.join(size))
+
+    # 세로로 늘어놓은 경우의 간격(y 순서로 정렬해 인접 간격을 낸다)
+    if len(boxes) >= 3 and tops and heights:
+        order = sorted(range(len(boxes)), key=lambda i: tops[i])
+        gaps = []
+        for a, b in zip(order, order[1:]):
+            gaps.append(round(tops[b] - (tops[a] + heights[a])))
+        if gaps and max(gaps) >= 0:
+            d = _spread(gaps)
+            tail = u' — %s' % (u'고르다' if d <= 1 else u'최대 %dpx 차이' % d)
+            lines.append(u'- 세로 간격: %spx%s' % (u'/'.join(str(g) for g in gaps), tail))
+    return lines
 
 
 def _hhmmss(ms):
@@ -63,7 +189,8 @@ class Store(object):
         # ★프로그램이 소유하는 메타. 주석 객체 '안'에 넣지 않는다 -
         #   apply() 는 브라우저가 보낸 주석 dict 를 id 로 통째 덮어쓰므로,
         #   사용자가 브라우저에서 메모를 한 번 고치면 우리가 넣은 필드가 날아간다.
-        self.meta = {}                  # aid -> {'note': str, 'refs': [aid, ...]}
+        # aid -> {'note': str, 'refs': [aid…], 'expected': str, 'priority': ''|high|mid|low}
+        self.meta = {}
         self.closing = u''              # 총평(추출·복사 때 사람이 적는 마지막 코멘트)
         self._replaying = False
 
@@ -79,6 +206,7 @@ class Store(object):
             p = {
                 'url': key[0], 'viewport': key[1], 'title': '', 'dpr': None,
                 'referrer': '', 'in_iframe': False,
+                'bg': '', 'scheme': '', 'prefers_dark': None,
                 'first_seen': _now(), 'last_seen': _now(),
                 'annotations': OrderedDict(),   # id -> annotation
                 'console': [], 'network': [],
@@ -96,10 +224,14 @@ class Store(object):
             p = self._page(key)
             # url·viewport 는 키라서 덮어쓰지 않는다. 나머지만 채운다.
             for k_src, k_dst in (('title', 'title'), ('dpr', 'dpr'),
-                                 ('referrer', 'referrer'), ('inIframe', 'in_iframe')):
+                                 ('referrer', 'referrer'), ('inIframe', 'in_iframe'),
+                                 ('bg', 'bg'), ('scheme', 'scheme'),
+                                 ('prefersDark', 'prefers_dark')):
                 v = info.get(k_src)
-                if v not in (None, ''):
+                if v is not None and v != '':
                     p[k_dst] = v
+                elif v is False:            # prefers_dark=False 는 '라이트' 라는 정보다
+                    p[k_dst] = False
             p['last_seen'] = _now()
             return key
 
@@ -207,6 +339,8 @@ class Store(object):
                         'comment': a.get('comment') or u'',
                         'note': m.get('note') or u'',
                         'refs': len(m.get('refs') or []),
+                        'expected': m.get('expected') or u'',
+                        'priority': m.get('priority') or u'',
                     })
                 out.append({
                     'no': i, 'title': p['title'] or u'(제목 없음)',
@@ -233,24 +367,34 @@ class Store(object):
     def get_meta(self, aid):
         with self.lock:
             m = self.meta.get(aid) or {}
-            return {'note': m.get('note') or u'', 'refs': list(m.get('refs') or [])}
+            return {'note': m.get('note') or u'', 'refs': list(m.get('refs') or []),
+                    'expected': m.get('expected') or u'',
+                    'priority': m.get('priority') or u''}
 
-    def set_meta(self, aid, note=u'', refs=None):
-        """보충 메모·연결을 저장한다. 둘 다 비면 항목 자체를 지운다."""
+    def set_meta(self, aid, note=u'', refs=None, expected=u'', priority=u''):
+        """보충 메모·연결·기대·우선순위를 저장한다. 전부 비면 항목 자체를 지운다.
+
+        ★'기대' 와 '우선순위' 는 SC-295 인계 문서의 QA 요청 ③ 이다 - 받는 쪽이
+          '지금 어떻고 어떻게 되어야 하나' 를 되묻지 않게 한다. 주석의 메모가 '현재',
+          여기 적는 것이 '기대' 다."""
         refs = [r for r in (refs or []) if r and r != aid]
         seen, uniq = set(), []
         for r in refs:                              # 중복 제거(순서 유지)
             if r not in seen:
                 seen.add(r)
                 uniq.append(r)
+        if priority not in PRIORITY_LABEL:
+            priority = u''
         with self.lock:
-            if note or uniq:
-                self.meta[aid] = {'note': note or u'', 'refs': uniq}
+            if note or uniq or expected or priority:
+                self.meta[aid] = {'note': note or u'', 'refs': uniq,
+                                  'expected': expected or u'', 'priority': priority}
             else:
                 self.meta.pop(aid, None)
             if not self._replaying:
-                self._append_jsonl({'t': 'meta', 'aid': aid,
-                                    'note': note or u'', 'refs': uniq})
+                self._append_jsonl({'t': 'meta', 'aid': aid, 'note': note or u'',
+                                    'refs': uniq, 'expected': expected or u'',
+                                    'priority': priority})
                 self.write_md()
 
     def set_closing(self, text):
@@ -291,6 +435,30 @@ class Store(object):
                 idx[aid] = (i, j, a.get('element') or u'?', a.get('comment') or u'')
         return idx
 
+    def _render_index(self, pages):
+        """항목 목차. 한 줄에 하나 - 이슈 댓글에 그대로 붙일 수 있게.
+
+        ★SC-295 인계 문서의 QA 요청 ④: 댓글이 "첨부하였습니다" 한 줄이라 이슈 검색·추적에
+          안 걸렸다. 문서 맨 앞에 제목 줄이 있으면 그걸 그대로 붙이면 된다."""
+        rows = []
+        n = 0
+        for i, p in enumerate(pages, 1):
+            for j, (aid, a) in enumerate(p['annotations'].items(), 1):
+                n += 1
+                m = self.meta.get(aid) or {}
+                pr = PRIORITY_LABEL.get(m.get('priority') or '', u'')
+                memo = (a.get('comment') or u'').replace(u'\n', u' ').strip()
+                if len(memo) > 60:
+                    memo = memo[:60] + u'…'
+                rows.append(u'%d. [화면 %d] %s%s — %s%s'
+                            % (n, i, a.get('element') or u'?',
+                               u' %d번' % j if len(p['annotations']) > 1 else u'',
+                               memo or u'(메모 없음)',
+                               u'  *(%s)*' % pr if pr else u''))
+        if not rows:
+            return []
+        return [u'## 항목 %d건' % n, u''] + rows + [u'']
+
     def _back_refs(self):
         """연결의 반대 방향. 어느 쪽 주석을 읽어도 관계가 보이려면 필요하다."""
         back = {}
@@ -310,6 +478,7 @@ class Store(object):
                 lines += [u'## 총평', u'']
                 lines += self.closing.strip().splitlines()
                 lines.append(u'')
+            lines += self._render_index(pages)
             if not pages:
                 lines += [u'---', u'', u'(아직 주석이 없습니다)', u'']
                 return u'\n'.join(lines)
@@ -323,6 +492,10 @@ class Store(object):
                           u'- 해상도: %s%s' % (p['viewport'] or u'미상',
                                             u' · DPR %s' % p['dpr'] if p['dpr'] else u''),
                           u'- 시각: %s ~ %s' % (p['first_seen'], p['last_seen'])]
+                basis = _color_basis(p)
+                if basis:
+                    # 색 지적을 받는 쪽이 어떤 테마의 값을 보고 있는지 알아야 한다.
+                    lines.append(u'- 색 기준: %s' % basis)
                 if p['in_iframe']:
                     lines.append(u'- 이 화면은 iframe 안이었습니다')
                 if p['referrer']:
@@ -348,6 +521,15 @@ class Store(object):
             m = self.meta.get(aid) or {}
             lines += [u'## %d. %s' % (i, a.get('element') or u'?'), u'',
                       u'> %s' % (a.get('comment') or u'(메모 없음)'), u'']
+            pr = PRIORITY_LABEL.get(m.get('priority') or '', u'')
+            if pr:
+                lines.append(u'- 우선순위: %s' % pr)
+            if m.get('expected'):
+                # 메모가 '현재', 이것이 '기대' 다. 받는 쪽이 되묻지 않게 나눈다.
+                exp = m['expected'].strip().splitlines()
+                lines.append(u'- 기대: %s' % exp[0])
+                for extra in exp[1:]:
+                    lines.append(u'  %s' % extra)
             ts = _hhmmss(a.get('timestamp'))
             if ts:
                 # ★이어지는 액션의 순서는 여기서만 읽을 수 있다(화면 키에는 시간이 없다).
@@ -372,6 +554,13 @@ class Store(object):
             if b:
                 lines.append(u'- 박스: x=%s y=%s w=%s h=%s'
                              % (b.get('x'), b.get('y'), b.get('width'), b.get('height')))
+            lines += _geometry_lines(a.get('elementBoundingBoxes'))
+            if a.get('nearbyElements'):
+                lines.append(u'- 주변 요소: %s' % str(a['nearbyElements'])[:200])
+            lay = _layout_bits(a.get('computedStyles'))
+            if lay:
+                # ★자르기에 걸려 사라지던 값들이다. 스타일 줄보다 먼저 세운다.
+                lines.append(u'- 배치: %s' % u' · '.join(lay))
             if a.get('computedStyles'):
                 lines.append(u'- 스타일: %s' % str(a['computedStyles'])[:300])
             if a.get('reactComponents'):
@@ -428,7 +617,9 @@ class Store(object):
                             self.merge_unknown(rec.get('url'), rec.get('viewport'))
                         elif t == 'meta':
                             self.set_meta(rec.get('aid'), rec.get('note') or u'',
-                                          rec.get('refs') or [])
+                                          rec.get('refs') or [],
+                                          rec.get('expected') or u'',
+                                          rec.get('priority') or u'')
                         elif t == 'closing':
                             self.set_closing(rec.get('text') or u'')
                         # 모르는 t 는 무시한다 - 옛 파일과 앞으로의 확장 양쪽을 위해.

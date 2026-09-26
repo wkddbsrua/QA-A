@@ -100,6 +100,22 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
             dpr: window.devicePixelRatio || 1,
             referrer: document.referrer || '',
             inIframe: window.top !== window.self,
+            /* ★색 기준. 다크 화면에서 캡처한 색값을 라이트 기준으로 읽어 지적이 어긋난
+             *   일이 있었다(SC-295 QA 회신). 강제할 수는 없으니 무엇을 보고 있었는지 남긴다. */
+            bg: (function () {
+                try { return getComputedStyle(document.body).backgroundColor || ''; }
+                catch (e) { return ''; }
+            })(),
+            scheme: (function () {
+                try { return getComputedStyle(document.documentElement).colorScheme || ''; }
+                catch (e) { return ''; }
+            })(),
+            prefersDark: (function () {
+                try {
+                    return !!(window.matchMedia &&
+                              window.matchMedia('(prefers-color-scheme: dark)').matches);
+                } catch (e) { return null; }
+            })(),
             ts: new Date().toISOString(),
             output: output || '',
             annotations: annotations || []
@@ -297,10 +313,15 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         return false;
     }
 
-    /* 주석 모드가 켜져 있는가. 커서 스타일이 모드와 함께 생겼다 사라진다 -
-     * 우리가 가진 신호 중 이것만 모드와 정확히 같이 움직인다(실측). */
+    /* 주석 모드가 켜져 있는가.
+     * ★`#feedback-cursor-styles` 로 판단하지 말 것. 그 <style> 은 모드를 끈 뒤에도
+     *   문서에 남는다(실측: 모드 OFF 인데 styleHasCrosshair=true). 그걸 쓰면 한 번
+     *   켠 뒤에는 영원히 '켜짐' 으로 읽혀, 모드를 끈 뒤에도 Esc 가드가 계속 발동해
+     *   **사용자가 모달을 닫을 수 없게 된다.**
+     *   모드와 함께 생겼다 사라지는 것은 '고르기 오버레이' 하나뿐이다(실측 0 ↔ 1).
+     *   우리 UI 안으로 범위를 좁혀야 한다 - 페이지에도 overlay 가 15개씩 있다. */
     function modeOn() {
-        return !!document.getElementById('feedback-cursor-styles');
+        return !!document.querySelector('[data-agentation-root] [class*="overlay"]');
     }
 
     function guardEsc() {
