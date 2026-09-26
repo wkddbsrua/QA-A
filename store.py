@@ -219,6 +219,35 @@ class Store(object):
                 out.append((aid, a))
         return out
 
+    def move_page(self, key, delta):
+        """화면(그룹) 자체의 순서를 사람이 정한다(프4).
+
+        ★화면 번호는 이 순서로 붙고, 연결(`- 관련:`)은 렌더 시점에 번호를 해석하므로
+          순서를 바꿔도 참조가 어긋나지 않는다. 화면 정체성 (주소, 해상도) 은 건드리지 않는다."""
+        with self.lock:
+            keys = list(self.pages.keys())
+            if key not in keys:
+                return None
+            i = keys.index(key)
+            j = max(0, min(len(keys) - 1, i + delta))
+            if i == j:
+                return keys
+            keys.insert(j, keys.pop(i))
+            self.pages = OrderedDict((k, self.pages[k]) for k in keys)
+            if not self._replaying:
+                self._append_jsonl({'t': 'porder',
+                                    'keys': [[k[0], k[1]] for k in keys]})
+                self.write_md()
+            return keys
+
+    def set_page_order(self, keys):
+        """기록에서 화면 순서를 되살린다. 모르는 화면은 무시하고, 빠진 화면은 뒤에 붙인다."""
+        with self.lock:
+            want = [tuple(k) for k in (keys or []) if isinstance(k, (list, tuple)) and len(k) == 2]
+            rest = [k for k in self.pages.keys() if k not in want]
+            ordered = [k for k in want if k in self.pages] + rest
+            self.pages = OrderedDict((k, self.pages[k]) for k in ordered)
+
     def set_order(self, key, ids):
         """화면 안 주석 순서를 사람이 정한다(프4)."""
         with self.lock:
@@ -686,6 +715,8 @@ class Store(object):
                     elif t == 'order':
                         self.set_order(self.key_of(rec.get('url'), rec.get('viewport')),
                                        rec.get('ids') or [])
+                    elif t == 'porder':
+                        self.set_page_order(rec.get('keys') or [])
                     # 모르는 t 는 무시한다 - 옛 파일과 앞으로의 확장 양쪽을 위해.
             finally:
                 self._replaying = False

@@ -155,6 +155,8 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         root = null;
         var host = document.getElementById(HOST_ID);
         if (host && host.parentNode) host.parentNode.removeChild(host);
+        var badge = document.getElementById(BADGE_ID);
+        if (badge && badge.parentNode) badge.parentNode.removeChild(badge);
         var frame = document.getElementById(TOP_ID);
         if (frame) {
             try { frame.hidePopover(); } catch (e) { /* 무시 */ }
@@ -536,6 +538,54 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         setInterval(growPopup, 400);            // 관찰이 막히는 문서에서도 되게
     }
 
+    /* ── 브9: 레이아웃 변경 개수를 화면에도 보여 준다 ─────────
+     * 요구는 "주석 모드에서도 레이아웃 모드의 변경사항 개수를 알 수 있으면" 이었다.
+     * 프로그램 창 배지에도 뜨지만, 화면을 보는 중에 알아야 하므로 여기에도 둔다.
+     * ★버튼이 아니다 - 누를 수 없는 표시다(pointer-events:none). 툴바를 늘리지 않는다.
+     */
+    var BADGE_ID = '__qa_moved_badge';
+
+    function rearrangeCount() {
+        var n = 0;
+        try {
+            for (var i = 0; i < localStorage.length; i++) {
+                var k = localStorage.key(i);
+                if (!k || k.indexOf('agentation-rearrange-') !== 0) continue;
+                var v = null;
+                try { v = JSON.parse(localStorage.getItem(k)); } catch (e) { /* 무시 */ }
+                if (Object.prototype.toString.call(v) === '[object Array]') n += v.length;
+                else if (v && typeof v === 'object') n += Object.keys(v).length;
+                else n += 1;
+            }
+        } catch (e) { /* 저장소 접근 불가 */ }
+        return n;
+    }
+
+    function showMovedBadge() {
+        try {
+            if (!isMine()) return;
+            var n = mounted() ? rearrangeCount() : 0;
+            var el = document.getElementById(BADGE_ID);
+            if (!n) {
+                if (el && el.parentNode) el.parentNode.removeChild(el);
+                return;
+            }
+            var frame = topFrame();
+            if (!el) {
+                el = document.createElement('div');
+                el.id = BADGE_ID;
+                el.style.cssText = 'position:fixed;right:1.25rem;bottom:4.6rem;' +
+                    'padding:4px 10px;border-radius:999px;background:#111;color:#fff;' +
+                    'font:600 12px/1.5 "Malgun Gothic",system-ui,sans-serif;' +
+                    'box-shadow:0 2px 8px rgba(0,0,0,.28);pointer-events:none;' +
+                    'white-space:nowrap;';
+            }
+            if (el.parentNode !== frame) frame.appendChild(el);
+            var text = '레이아웃 변경 ' + n;
+            if (el.textContent !== text) el.textContent = text;
+        } catch (e) { /* 무시 */ }
+    }
+
     /* ── 화면 정보 통지 · 감시 ───────────────────────────────── */
     var resizeTimer = null;
 
@@ -566,7 +616,10 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
             }
             if (mounted()) {
                 if (!shouldMount()) unmount();
-                else keepOnTop();            // 모달이 열렸다 닫혔을 수 있다
+                else {
+                    keepOnTop();             // 모달이 열렸다 닫혔을 수 있다
+                    showMovedBadge();        // 레이아웃 변경 개수(브9)
+                }
             } else {
                 mount();
             }

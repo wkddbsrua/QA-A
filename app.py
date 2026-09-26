@@ -360,6 +360,9 @@ class App(tk.Tk):
         self.tree.bind('<Double-1>', self.on_row_open)
         # 프3: 화면 줄에서 그 주소로 브라우저를 보낸다. 프4: 주석 순서를 옮긴다.
         self.tree.bind('<Button-3>', self.on_row_menu)
+        # 프3: '주소' 열을 클릭하면 그 화면으로 보낸다(요구가 "url 을 클릭하면" 이었다).
+        #   다른 열은 평소대로 선택만 한다 - 어디를 눌러도 이동하면 오작동이 된다.
+        self.tree.bind('<Button-1>', self.on_row_click)
         self.tree.bind('<Control-Up>', lambda e: self.move_row(-1))
         self.tree.bind('<Control-Down>', lambda e: self.move_row(1))
         self._tree_sig = None
@@ -598,6 +601,9 @@ class App(tk.Tk):
                                    command=lambda u=url: self.goto_url(u))
             self._menu.add_command(label='주소 복사',
                                    command=lambda u=url: self.copy_text(u))
+            self._menu.add_separator()
+            self._menu.add_command(label='화면 위로 (Ctrl+↑)', command=lambda: self.move_row(-1))
+            self._menu.add_command(label='화면 아래로 (Ctrl+↓)', command=lambda: self.move_row(1))
         else:
             aid = iid[2:]
             self._menu.add_command(label='보강 창 열기',
@@ -628,10 +634,34 @@ class App(tk.Tk):
         if set_clipboard(text or ''):
             self.log('클립보드로 복사 - %s' % (text or '')[:80])
 
+    def on_row_click(self, event):
+        """프3: 주소 열을 클릭하면 그 화면으로 이동한다."""
+        if self.tree.identify_region(event.x, event.y) != 'cell':
+            return
+        if self.tree.identify_column(event.x) != '#4':      # 4번째 열 = 주소
+            return
+        iid = self.tree.identify_row(event.y)
+        key = self._row_key(iid) if iid else None
+        if key and key[0]:
+            self.goto_url(key[0])
+
     def move_row(self, delta):
-        """프4: 같은 화면 안에서 주석 순서를 옮긴다."""
+        """프4: 주석 줄이면 화면 안 순서를, 화면 줄이면 화면 순서를 옮긴다."""
         sel = self.tree.selection()
-        if not sel or not sel[0].startswith('a|'):
+        if not sel:
+            return
+        if sel[0].startswith('p|'):                         # 화면(그룹) 순서
+            key = self._row_key(sel[0])
+            if not key or self.store.move_page(key, delta) is None:
+                return
+            self._tree_sig = None
+            self._fill_tree()
+            if self.tree.exists(sel[0]):
+                self.tree.selection_set(sel[0])
+                self.tree.see(sel[0])
+            self.log('화면 순서를 옮겼습니다 - 결과 문서의 화면 번호도 함께 바뀝니다.')
+            return
+        if not sel[0].startswith('a|'):
             return
         iid = sel[0]
         aid = iid[2:]
