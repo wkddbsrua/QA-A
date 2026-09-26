@@ -366,7 +366,7 @@ class App(tk.Tk):
         self._menu = tk.Menu(self, tearoff=0)
         # 해상도는 화면 정체성의 일부다(같은 주소라도 해상도가 다르면 다른 줄).
         for key, label, width, anchor in (
-                ('no', '화면', 44, 'center'), ('title', '제목', 190, 'w'),
+                ('no', '화면', 44, 'center'), ('title', '제목', 250, 'w'),
                 ('vp', '해상도', 92, 'center'), ('url', '주소', 360, 'w'),
                 ('ann', '주석', 52, 'center'),
                 ('con', '콘솔에러', 66, 'center'), ('net', '실패요청', 66, 'center')):
@@ -554,12 +554,14 @@ class App(tk.Tk):
                 if a['refs']:
                     mark += ' ↔%d' % a['refs']      # 연결이 있다
                 memo = (a['comment'] or '(메모 없음)').replace('\n', ' ')
-                if len(memo) > 60:
-                    memo = memo[:60] + '…'
+                if len(memo) > 90:
+                    memo = memo[:90] + '…'
+                # ★메모는 넓은 '주소' 열에 싣는다. 제목 열에 다 넣으면 잘려서 정작
+                #   표식([높음]·→기대·✎·↔N)이 안 보인다(캡처로 확인했다).
                 self.tree.insert(pid, 'end', iid='a|%s' % a['aid'],
                                  values=('%d.' % a['no'],
-                                         '%s — %s%s' % (a['element'], memo, mark),
-                                         '', '', '', '', ''))
+                                         '%s%s' % (a['element'], mark),
+                                         '', memo, '', '', ''))
         for iid in sel:
             if self.tree.exists(iid):
                 self.tree.selection_add(iid)

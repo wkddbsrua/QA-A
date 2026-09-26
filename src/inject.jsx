@@ -494,6 +494,7 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
              *   그래서 노드에 표식을 남긴다 - 노드가 살아 있는 동안 상태도 살아 있다. */
             if (ta && !ta.hasAttribute('data-qa-grown')) {
                 var r = ta.getBoundingClientRect();
+                var pr0 = p.getBoundingClientRect();
                 if (r.width && r.height) {
                     ta.setAttribute('data-qa-grown', '1');
                     // 실측값의 2배. 숫자를 박지 않고 그때그때 두 배로 만든다
@@ -502,6 +503,14 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
                     var h = Math.min(Math.round(r.height * 2), window.innerHeight - 160);
                     ta.style.width = w + 'px';
                     ta.style.height = h + 'px';
+                    /* ★팝업 통(패널)도 같이 넓혀야 한다. 입력칸만 키우면 테두리가 통
+                     *   밖으로 튀어나온다(실측: 캡처에서 파란 테두리가 패널을 뚫고 나갔다).
+                     *   통과 입력칸의 폭 차이(=여백)를 유지한 채 넓힌다. */
+                    var pad = Math.max(0, Math.round(pr0.width - r.width));
+                    var pw = Math.min(w + pad, window.innerWidth - 24);
+                    p.style.minWidth = pw + 'px';
+                    p.style.maxWidth = 'none';
+                    p.style.boxSizing = 'border-box';
                 }
             }
             // 커진 팝업이 화면을 벗어나면 안으로 당긴다.

@@ -10,11 +10,11 @@
   *{ box-sizing:border-box; }
   body{ margin:0; background:#fff; color:var(--ink); line-height:1.75;
         font-family:"맑은 고딕","Malgun Gothic","Segoe UI",system-ui,sans-serif; }
-  .wrap{ max-width:920px; margin:0 auto; padding:44px 24px 90px; }
+  .wrap{ max-width:960px; margin:0 auto; padding:44px 24px 90px; }
   h1{ font-size:30px; margin:0 0 6px; letter-spacing:-.4px; }
-  .lead{ color:var(--sub); font-size:15px; margin:0 0 34px; }
-  h2{ font-size:20px; margin:46px 0 12px; padding-bottom:8px; border-bottom:2px solid var(--ink); }
-  h3{ font-size:16px; margin:26px 0 8px; }
+  .lead{ color:var(--sub); font-size:15px; margin:0 0 30px; }
+  h2{ font-size:20px; margin:52px 0 14px; padding-bottom:8px; border-bottom:2px solid var(--ink); }
+  h3{ font-size:16px; margin:28px 0 8px; }
   p,li{ font-size:15px; }
   ul,ol{ padding-left:22px; } li{ margin:5px 0; }
   code{ background:var(--soft); border:1px solid var(--line); border-radius:5px;
@@ -22,8 +22,6 @@
   table{ border-collapse:collapse; width:100%; margin:14px 0; font-size:14.5px; }
   th,td{ border:1px solid var(--line); padding:9px 12px; text-align:left; vertical-align:middle; }
   th{ background:var(--soft); font-weight:700; white-space:nowrap; }
-  td.ic{ width:56px; text-align:center; background:#1c1c1e; }
-  td.ic img{ display:block; margin:0 auto; width:26px; height:26px; }
   .steps{ counter-reset:s; list-style:none; padding:0; margin:16px 0; }
   .steps li{ counter-increment:s; position:relative; padding:12px 14px 12px 52px;
              border:1px solid var(--line); border-radius:10px; margin:9px 0; }
@@ -41,300 +39,248 @@
   .btn{ display:inline-block; background:var(--ink); color:#fff; border-radius:6px;
         padding:1px 9px; font-size:13px; white-space:nowrap; }
   .muted{ color:var(--mute); font-size:13.5px; }
-  .shot{ margin:14px 0; }
-  .shot img{ max-width:100%; border-radius:12px; }
-  .shot .cap{ color:var(--mute); font-size:13px; margin-top:5px; }
+  .shot{ margin:16px 0; }
+  .shot img{ max-width:100%; border:1px solid var(--line); border-radius:12px; display:block; }
+  .shot .cap{ color:var(--mute); font-size:13px; margin-top:6px; }
   .find{ display:flex; gap:18px; align-items:center; border:1px solid var(--line);
          border-radius:12px; padding:16px 18px; margin:16px 0; background:var(--soft); }
   .find img{ width:74px; height:74px; border-radius:14px; flex:0 0 auto; }
   .find b{ font-size:16px; }
-  hr{ border:0; border-top:1px solid var(--line); margin:40px 0; }
+  .two{ display:flex; gap:16px; flex-wrap:wrap; margin:16px 0; }
+  .two > div{ flex:1 1 320px; }
+  .two img{ width:100%; border:1px solid var(--line); border-radius:10px; display:block; }
+  .flow{ margin:18px 0 6px; }
+  .flow svg{ width:100%; height:auto; display:block; }
+  hr{ border:0; border-top:1px solid var(--line); margin:44px 0; }
 </style>
 </head>
 <body>
 <div class="wrap">
 
 <h1>화면 주석 QA — 사용법</h1>
-<p class="lead">고칠 곳을 <b>화면에서 클릭해</b> 남기면, 개발자가 바로 찾을 수 있는 정보(요소 위치·크기·글꼴·색)가 자동으로 붙습니다.
-설치할 것은 없고, 어떤 사이트에서나 씁니다.</p>
+<p class="lead">고칠 곳을 <b>화면에서 두 번 클릭해</b> 남기면, 개발자가 바로 찾을 수 있는 정보
+(CSS 경로·위치·크기·글꼴·색)가 자동으로 붙습니다. <b>스크린샷을 따로 붙이지 않아도 됩니다.</b></p>
 
-<h2>1. 3분 요약</h2>
+<div class="flow">
+<svg viewBox="0 0 920 132" role="img" aria-label="전체 흐름: exe 실행 → QA 시작 → 두 번 클릭해 메모 → 프로그램에 쌓임 → 복사·추출">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#111"/>
+    </marker>
+    <style>
+      .bx{ fill:#fff; stroke:#111; stroke-width:1.6; }
+      .bx2{ fill:#f7f7f8; stroke:#c9c9ce; stroke-width:1.4; }
+      .t{ font:600 13px "맑은 고딕","Malgun Gothic",sans-serif; fill:#111; }
+      .s{ font:12px "맑은 고딕","Malgun Gothic",sans-serif; fill:#666; }
+      .ln{ stroke:#111; stroke-width:1.6; marker-end:url(#a); }
+    </style>
+  </defs>
+  <rect class="bx" x="2" y="26" width="150" height="58" rx="10"/>
+  <text class="t" x="20" y="50">① exe 두 번 클릭</text>
+  <text class="s" x="20" y="70">바탕화면 아이콘</text>
+
+  <line class="ln" x1="156" y1="55" x2="188" y2="55"/>
+
+  <rect class="bx" x="192" y="26" width="160" height="58" rx="10"/>
+  <text class="t" x="210" y="50">② [QA 시작]</text>
+  <text class="s" x="210" y="70">브라우저가 열립니다</text>
+
+  <line class="ln" x1="356" y1="55" x2="388" y2="55"/>
+
+  <rect class="bx" x="392" y="14" width="200" height="82" rx="10"/>
+  <text class="t" x="410" y="40">③ 고칠 곳을 두 번 클릭</text>
+  <text class="s" x="410" y="60">메모를 적고</text>
+  <text class="s" x="410" y="78">Ctrl + Enter</text>
+
+  <line class="ln" x1="596" y1="55" x2="628" y2="55"/>
+
+  <rect class="bx2" x="632" y="14" width="144" height="82" rx="10"/>
+  <text class="t" x="650" y="40">④ 프로그램에</text>
+  <text class="t" x="650" y="58">자동으로 쌓임</text>
+  <text class="s" x="650" y="78">화면별로 정리</text>
+
+  <line class="ln" x1="780" y1="55" x2="812" y2="55"/>
+
+  <rect class="bx" x="816" y="26" width="102" height="58" rx="10"/>
+  <text class="t" x="832" y="50">⑤ 복사·추출</text>
+  <text class="s" x="832" y="70">붙여넣기</text>
+
+  <text class="s" x="392" y="120">※ 페이지를 옮겨도 도구가 자동으로 따라옵니다 — 다시 켤 필요 없습니다.</text>
+</svg>
+</div>
+
+<div class="tip"><b>이것만 기억하세요.</b> ①exe → ②[QA 시작] → ③<b>두 번 클릭</b>하고 메모 →
+④<span class="k">Ctrl</span>+<span class="k">Enter</span> → ⑤[클립보드 복사]</div>
+
+
+<h2>1. 시작하기</h2>
 <ol class="steps">
   <li><b>바탕화면 <code>화면주석-QA.exe</code> 를 두 번 클릭</b>합니다.
-      <span class="muted">처음에 파란 경고창이 나오면 [추가 정보] → [실행]. 서명이 없는 프로그램이라 그렇습니다.</span></li>
-  <li><b>주소를 확인하고 <span class="btn">QA 시작</span></b> — 브라우저가 열립니다.
-      <span class="muted">처음 한 번만 로그인하면 다음부터 유지됩니다(전용 창이라 평소 브라우저와 무관).</span></li>
-  <li><b>화면 우측 아래의 둥근 버튼</b>을 눌러 주석 모드를 켭니다. (아래 그림)
-      <span class="muted">또는 <span class="k">Esc</span> — 켜고 끄기가 모두 <span class="k">Esc</span> 입니다.</span></li>
-  <li><b>고칠 곳을 두 번 클릭</b>하고 메모를 적습니다. 번호 핀이 찍힙니다.
-      <span class="muted">한 번 클릭은 아무 일도 하지 않습니다 — 실수로 메모창이 뜨지 않게 하기 위함입니다.</span></li>
-  <li>여러 화면을 돌아다니며 계속 남깁니다. <b>화면을 옮겨도 다시 켤 필요 없습니다.</b></li>
-  <li>끝나면 프로그램 창에서 <span class="btn">클립보드 복사</span> → 메일·메신저·이슈에 붙여넣기.</li>
+      <span class="muted">파란 경고창이 나오면 [추가 정보] → [실행]. 서명이 없는 프로그램이라 그렇습니다.</span></li>
+  <li><b>주소를 확인하고 <span class="btn">QA 시작</span></b> — 전용 브라우저가 열립니다.
+      <span class="muted">처음 한 번만 로그인하면 다음부터 유지됩니다.</span></li>
+  <li>화면 <b>우측 아래 둥근 버튼</b>을 누르거나 <span class="k">Esc</span> 를 눌러 <b>주석 모드</b>를 켭니다.</li>
 </ol>
 
 <div class="find">
   <img src="{{img:collapsed.png}}" alt="접힌 주석 버튼">
   <div><b>이 버튼을 찾으세요.</b><br>
-    화면 <b>우측 아래</b>에 있는 검은 둥근 버튼입니다. 누르면 주석 모드가 켜집니다.<br>
-    <span class="muted">주석을 남기면 이 버튼에 개수가 배지로 표시됩니다.</span></div>
+    화면 <b>우측 아래</b>의 검은 둥근 버튼입니다. 주석을 남기면 개수가 배지로 표시됩니다.<br>
+    <span class="muted">버튼을 찾지 않아도 <span class="k">Esc</span> 로 켜고 끌 수 있습니다.</span></div>
 </div>
 
-<div class="tip"><b>이것만 기억하세요.</b> ①exe 두 번 클릭 → ②[QA 시작] → ③우측 아래 둥근 버튼 → ④클릭하고 메모 → ⑤[클립보드 복사]</div>
 
-<h2>2. 주석 도구 — 버튼이 무엇인지</h2>
-<div class="shot">
-  <img src="{{img:toolbar.png}}" alt="펼친 주석 툴바">
-  <div class="cap">둥근 버튼을 누르면 이렇게 펼쳐집니다(실제 화면 캡처).</div>
+<h2>2. 화면에 주석 남기기</h2>
+
+<div class="two">
+  <div>
+    <img src="{{img:hover.png}}" alt="마우스를 올리면 테두리와 요소 이름이 보인다">
+    <p class="muted">① 마우스를 올리면 <b>테두리와 요소 이름</b>이 보입니다.</p>
+  </div>
+  <div>
+    <img src="{{img:memo.png}}" alt="두 번 클릭하면 메모창이 열린다">
+    <p class="muted">② <b>두 번 클릭</b>하면 메모창이 열립니다. 적고 <span class="k">Ctrl</span>+<span class="k">Enter</span>.</p>
+  </div>
 </div>
 
 <table>
-  <tr><th colspan="2">아이콘</th><th>무엇을 하나</th></tr>
-  <tr><td class="ic"><img src="{{img:icon00.png}}" alt=""></td><th>애니메이션 정지</th>
-      <td>움직이는 배너·로딩이 있으면 멈춰 놓고 지적합니다. 다시 누르면 재생.</td></tr>
-  <tr><td class="ic"><img src="{{img:icon01.png}}" alt=""></td><th>레이아웃 모드</th>
-      <td>요소를 직접 옮기거나 크기를 바꿔 <b>원하는 배치를 보여 줍니다</b>(6절 ⑤).</td></tr>
-  <tr><td class="ic"><img src="{{img:icon02.png}}" alt=""></td><th>핀 숨기기 / 보이기</th>
-      <td>스크린샷 찍을 때 번호 핀만 잠깐 감춥니다. <b>지워지는 것이 아닙니다.</b></td></tr>
-  <tr><td class="ic"><img src="{{img:icon03.png}}" alt=""></td><th>피드백 복사</th>
-      <td><b>이 화면에서 남긴 것만</b> 글로 복사합니다.
-          <span class="muted">전체는 프로그램 창의 [클립보드 복사]</span></td></tr>
-  <tr><td class="ic"><img src="{{img:icon05.png}}" alt=""></td><th>전체 지우기</th>
-      <td>이 화면의 주석을 모두 지웁니다. <span class="k">X</span><br>
-          <b>프로그램 목록에서도 함께 사라집니다</b> — 한쪽에만 남지 않습니다.</td></tr>
-  <tr><td class="ic"><img src="{{img:icon06.png}}" alt=""></td><th>설정</th>
-      <td>출력 상세도·핀 색상 등(5절).</td></tr>
-  <tr><td class="ic"><img src="{{img:icon07.png}}" alt=""></td><th>나가기 (접기)</th>
-      <td>주석 모드를 끄고 둥근 버튼으로 접습니다. <span class="k">Esc</span></td></tr>
+  <tr><th>이렇게 하면</th><th>이렇게 됩니다</th></tr>
+  <tr><td><b>두 번 클릭</b></td><td>그 요소 하나에 메모 — 대부분 이걸로 끝납니다</td></tr>
+  <tr><td><b>글자를 드래그</b>한 뒤 두 번 클릭</td><td>그 문구가 그대로 첨부됩니다 — 오타·표현 지적에 가장 좋습니다</td></tr>
+  <tr><td><b>빈 곳부터 사각형으로 드래그</b></td><td>여러 요소를 한 덩이로 — <b>정렬·간격 차이가 숫자로</b> 결과에 적힙니다</td></tr>
+  <tr><td>툴바의 <b>레이아웃 모드</b></td><td>요소를 직접 옮겨 원하는 배치를 보여 줍니다</td></tr>
 </table>
-<p class="muted">연동(MCP·웹훅)을 설정하면 <b>주석 보내기</b> 버튼이 하나 더 생깁니다. QA 는 쓰지 않아도 됩니다.</p>
 
 <h3>단축키</h3>
-<p><span class="k">Esc</span> <b>모드 켜기·끄기</b>(취소도 같은 키) ·
+<p><span class="k">Esc</span> 주석 모드 <b>켜기·끄기</b> ·
    <span class="k">Ctrl</span>+<span class="k">Enter</span> 메모 확정 ·
-   <span class="k">Delete</span> / <span class="k">Backspace</span> 선택한 주석 삭제</p>
-<div class="note"><b>화면을 옮길 때</b>는 <span class="k">Esc</span> 로 끄고 이동한 뒤 다시 <span class="k">Esc</span> 로 켜면 됩니다.
-<b>모달(팝업)이 열려 있을 때는 <span class="k">Esc</span> 가 모드를 켜지 않습니다</b> — 그 <span class="k">Esc</span> 는
-팝업을 닫는 데 쓰라는 뜻입니다. 그때는 둥근 버튼으로 켜세요.</div>
+   <span class="k">Delete</span> 선택한 주석 삭제</p>
 
-<h2>3. ★알아둘 이슈 — 주석 모드에서는 페이지 클릭이 안 됩니다</h2>
-<div class="warn">
-  <b>주석 모드가 켜져 있으면 페이지의 원래 클릭(메뉴·링크·버튼)이 동작하지 않습니다.</b>
-  도구가 클릭을 먼저 받아 "요소를 고르는" 동작으로 쓰기 때문입니다.
-  <b>썸네일·카드처럼 버튼이 아닌 것도 막습니다</b> — 예전에는 이런 것이 새어 나가
-  미리보기가 열리곤 했습니다.<br>
-  <b>다른 화면으로 가려면 <span class="k">Esc</span> 를 눌러 모드를 끄고 이동하세요.</b> 이동한 뒤 다시 켜면 됩니다.
+<div class="note"><b>한 번 클릭은 아무 일도 하지 않습니다.</b> 실수로 메모창이 뜨는 것을 막기 위해서입니다.<br>
+<b>주석 모드에서는 페이지의 원래 클릭(메뉴·링크·버튼·썸네일)이 동작하지 않습니다.</b>
+화면을 옮기려면 <span class="k">Esc</span> 로 끄고 이동한 뒤 다시 <span class="k">Esc</span>.</div>
+
+
+<h2>3. 팝업(모달)에 주석 달기</h2>
+<p>팝업 안의 요소에도 <b>그대로 주석을 달 수 있습니다.</b> 순서만 지켜 주세요.</p>
+<ol class="steps">
+  <li><span class="k">Esc</span> 로 주석 모드를 <b>끄고</b> 팝업을 엽니다.
+      <span class="muted">모드가 켜져 있으면 팝업을 여는 버튼도 눌리지 않습니다.</span></li>
+  <li>팝업이 열린 상태에서 <b>둥근 버튼</b>으로 주석 모드를 켭니다.
+      <span class="muted">1초쯤 뒤에 눌립니다 — 도구가 팝업 위로 올라가는 시간입니다.</span></li>
+  <li>팝업 안을 <b>두 번 클릭</b>해 메모를 남깁니다.</li>
+</ol>
+<div class="note"><b>팝업이 열려 있는 동안 <span class="k">Esc</span> 는 주석 모드를 켜지 않습니다.</b>
+그 <span class="k">Esc</span> 는 팝업을 닫는 데 쓰라는 뜻입니다. 그때는 둥근 버튼으로 켜세요.<br>
+반대로 <b>주석 모드가 켜져 있으면 <span class="k">Esc</span> 로 팝업이 닫히지 않습니다</b> —
+지적하려던 팝업이 사라지지 않게 도구가 막습니다.</div>
+<p class="muted">화면을 덮는 팝업, 아주 높은 층에 올린 팝업, 브라우저 기본 팝업(<code>&lt;dialog&gt;</code>) 모두 됩니다.
+팝업 안이 <b>또 다른 <code>iframe</code></b> 인 경우에만 안쪽을 고를 수 없습니다.</p>
+
+
+<h2>4. 관리자 화면(좌측 메뉴가 있는 구조)</h2>
+<p>내용이 <code>iframe</code> 안에 있는 구조에서는 <b>도구가 내용 영역을 담당</b>합니다.</p>
+<table>
+  <tr><th></th><th>기본 (자동)</th><th>“툴바를 최상위 화면에 고정”을 켜면</th></tr>
+  <tr><th>내용 영역 주석</th><td><b>됩니다</b></td><td>안 됩니다</td></tr>
+  <tr><th>좌측 메뉴·상단바 주석</th><td>안 됩니다</td><td><b>됩니다</b></td></tr>
+  <tr><th>모드를 끄지 않고 메뉴 이동</th><td><b>됩니다</b></td><td>안 됩니다</td></tr>
+</table>
+<div class="tip"><b>둘 중 하나만 됩니다.</b> 브라우저는 서로 다른 화면(<code>iframe</code>) 안쪽을
+한 번에 다룰 수 없습니다. 그래서 <b>필요할 때 프로그램 창의 체크박스로 바꿔 쓰세요.</b>
+바꿔도 <b>남긴 주석은 그대로 있습니다.</b></div>
+
+
+<h2>5. 프로그램 창</h2>
+<div class="shot">
+  <img src="{{img:app-list.png}}" alt="프로그램 창 — 화면별 목록과 그 밑의 주석 줄">
+  <div class="cap">화면 왼쪽 화살표를 누르면 그 화면의 주석이 펼쳐집니다.</div>
 </div>
-<p>실제로 재본 결과입니다.</p>
+
 <table>
-  <tr><th>상태</th><th>페이지 링크·메뉴 클릭</th><th>요소 주석</th></tr>
-  <tr><td>둥근 버튼으로 접혀 있음</td><td>정상 동작(이동됨)</td><td>안 됨</td></tr>
-  <tr><td><b>주석 모드 켜짐</b></td><td><b>안 됨</b>(클릭이 주석으로 감)</td><td>됨</td></tr>
-  <tr><td><span class="k">Esc</span> 로 끈 뒤</td><td>다시 정상 동작</td><td>안 됨</td></tr>
-</table>
-
-<h3>★모달(팝업창)이 열려 있을 때</h3>
-<p><b>모달 안의 요소에도 주석을 달 수 있습니다.</b> 순서만 지켜 주세요.</p>
-<ol class="steps">
-  <li><span class="k">Esc</span> 로 주석 모드를 <b>끄고</b> 모달을 엽니다.
-      <span class="muted">(모드가 켜져 있으면 모달을 여는 버튼도 눌리지 않습니다 — 위 표와 같은 이유)</span></li>
-  <li>모달이 열린 상태에서 <b>우측 아래 둥근 버튼</b>을 눌러 주석 모드를 켭니다.</li>
-  <li>모달 안을 클릭해 메모를 남깁니다.</li>
-</ol>
-<div class="note"><b>모달이 열려 있는 동안에는 <span class="k">Esc</span> 가 모달을 닫지 않습니다.</b>
-지적하려던 모달이 사라지지 않도록 도구가 막습니다. 모달을 닫을 때는 <b>먼저 주석 모드를 끄고</b>
-(툴바의 <b>나가기</b>) 모달의 <b>닫기</b> 버튼을 누르세요.</div>
-<p>실제로 재본 결과입니다.</p>
-<table>
-  <tr><th>모달 종류</th><th>모달 안 요소 주석</th></tr>
-  <tr><td>일반적인 팝업(화면을 덮는 층으로 만든 것)</td><td><b>됩니다</b></td></tr>
-  <tr><td>아주 높은 층에 올린 팝업</td><td><b>됩니다</b></td></tr>
-  <tr><td>브라우저 기본 팝업(<code>&lt;dialog&gt;</code>)</td><td><b>됩니다</b></td></tr>
-</table>
-<p class="muted">도구가 화면의 가장 위 층으로 올라가 모달 위에 서기 때문입니다.
-모달이 열리고 <b>도구가 그 위로 올라가는 데 0.2초쯤</b> 걸립니다 — 툴바가 눌리지 않으면 잠깐 기다리세요.</p>
-<div class="warn"><b>안 되는 경우도 있습니다.</b> 팝업이 스스로를 "팝업입니다" 라고 표시하지 않으면
-도구가 알아보지 못해 <span class="k">Esc</span> 가 그 팝업을 닫아 버립니다. 그럴 때는
-<span class="k">Esc</span> 대신 툴바의 <b>나가기</b> 로 모드를 끄세요.<br>
-또 팝업 안이 <b>또 다른 <code>iframe</code></b> 인 경우에는 그 안쪽 요소를 고를 수 없습니다 —
-팝업 바깥 영역에 주석을 남기고 메모에 적어 주세요.</div>
-
-<h3>관리자 화면(좌측 메뉴가 있는 구조)은 조금 다릅니다</h3>
-<p>내용이 <code>iframe</code> 안에 있는 구조에서는 <b>내용 영역만</b> 클릭이 막힙니다.</p>
-<ul>
-  <li><b>좌측 메뉴·상단바는 주석 모드에서도 그대로 눌립니다</b> → 모드를 끄지 않고 화면을 옮겨 다닐 수 있습니다. <span class="muted">(실측 확인)</span></li>
-  <li>대신 <b>좌측 메뉴·상단바 자체에는 주석을 달 수 없습니다.</b> 도구가 내용 영역을 담당하기 때문입니다.
-      그 부분을 지적할 때는 내용 영역에 주석을 남기고 메모에 <b>"좌측 사이드바 …"</b> 라고 적어 주세요.
-      <span class="muted">이게 불편하면 도구를 상단으로 옮기는 방식을 추가할 수 있습니다 — 요청해 주세요.</span></li>
-</ul>
-
-<div class="note"><b>메뉴가 자꾸 눌려서 방해될 때</b>는 반대로 설정의 <b>페이지 클릭 차단</b>을 켜세요.
-모드를 끈 상태에서도 페이지 클릭이 막혀, 실수로 화면이 넘어가는 것을 막습니다.</div>
-
-<div class="tip"><b>지우면 양쪽이 같이 지워집니다.</b> 어느 쪽에서 지워도 다른 쪽에 남지 않습니다.
-<table style="margin-top:10px">
-  <tr><th>어디서 지우나</th><th>이 화면의 핀</th><th>프로그램 목록</th></tr>
-  <tr><td>툴바의 <b>전체 지우기</b></td><td>사라짐</td><td><b>사라짐</b>(그 화면 것만)</td></tr>
-  <tr><td>주석 하나 선택 + <span class="k">Delete</span></td><td>사라짐</td><td><b>사라짐</b>(그 하나만)</td></tr>
-  <tr><td>프로그램의 <span class="btn">비우기</span></td><td>사라짐</td><td>사라짐(<b>모든 화면</b>)</td></tr>
-  <tr><td>프로그램의 <span class="btn">추출</span></td><td>사라짐</td><td>파일로 저장한 뒤 사라짐</td></tr>
-</table>
-<span class="muted">창 크기나 확대 비율을 바꾼 뒤에 지워도 그 화면의 기록은 전부 지워집니다.</span></div>
-
-<h2>4. 프로그램 창 (왼쪽 큰 창)</h2>
-<table>
-  <tr><th>테스트할 주소</th><td>검사할 사이트 주소. 마지막에 쓴 주소를 기억합니다.</td></tr>
-  <tr><th><span class="btn">QA 시작</span></th><td>브라우저를 엽니다. 이미 열려 있으면 그 창을 입력한 주소로 이동시킵니다.</td></tr>
-  <tr><th>오른쪽 위 배지</th><td><b>주입됨</b> = 주석 도구가 떠 있음. <b>주입 대기</b> = 준비 중(2~3초).
-      프로그램이 스스로 확인해 표시합니다.</td></tr>
-  <tr><th>목록</th><td>남긴 주석이 <b>화면별로</b> 쌓입니다. 화면·제목·해상도·주소·주석 수·그 화면의 오류 수.<br>
-      화면 왼쪽의 <b>화살표를 누르면 그 화면의 주석이 펼쳐집니다.</b></td></tr>
-  <tr><th>주석 줄 더블클릭</th><td><b>보강 창</b>이 열립니다(6절 ⑦).
-      <b>보충 메모</b>를 덧붙이거나, <b>다른 화면의 주석과 연결</b>할 수 있습니다.
-      <span class="muted">브라우저에서 적은 원래 메모는 여기서 고치지 않습니다 — 그건 화면의 핀을 눌러 고칩니다.</span></td></tr>
-  <tr><th><span class="btn">클립보드 복사</span></th><td>전체를 글로 만들어 클립보드에 담습니다. <b>프로그램을 닫아도 유지</b>됩니다.<br>
-      누르면 먼저 <b>총평</b>을 물어봅니다 — 없으면 [건너뛰기].</td></tr>
-  <tr><th><span class="btn">추출 (저장 후 삭제)</span></th><td>파일로 저장하고 목록을 비웁니다. 저장이 실패하면 목록을 그대로 둡니다.</td></tr>
-  <tr><th><span class="btn">비우기 (보관)</span></th><td>목록을 비웁니다. 원본은 결과 폴더의 <code>archive</code> 에 남습니다.
-      <b>브라우저에 남은 핀도 함께 사라집니다.</b></td></tr>
-  <tr><th><span class="btn">되돌리기</span></th><td>실수로 <b>전체 지우기</b>·<b>주석 삭제</b>를 했을 때 되살립니다.
-      <span class="muted">목록과 결과 문서는 되살아나지만 브라우저 화면의 핀은 되살아나지 않습니다.</span></td></tr>
+  <tr><th>테스트할 주소 · <span class="btn">QA 시작</span></th>
+      <td>브라우저를 엽니다. 이미 열려 있으면 그 창을 그 주소로 보냅니다.</td></tr>
+  <tr><th>오른쪽 위 배지</th><td><b>주입됨</b> = 도구가 떠 있음 · <b>주입 대기</b> = 준비 중(2~3초).
+      레이아웃을 바꿨으면 <b>레이아웃 변경 N</b> 도 함께 보입니다.</td></tr>
+  <tr><th>목록</th><td>화면별로 쌓입니다. <b>주석 줄을 두 번 클릭하면 보강 창</b>이 열립니다(6절).<br>
+      <b>우클릭</b> → 화면 줄은 <b>이 화면으로 이동</b>·주소 복사, 주석 줄은
+      <b>위로/아래로</b>(<span class="k">Ctrl</span>+<span class="k">↑</span>/<span class="k">↓</span>).</td></tr>
+  <tr><th><span class="btn">클립보드 복사</span></th><td>전체를 글로 만들어 담습니다. <b>프로그램을 닫아도 유지</b>됩니다.
+      누르면 먼저 <b>총평</b>을 물어봅니다.</td></tr>
+  <tr><th><span class="btn">추출 (저장 후 삭제)</span></th><td>파일로 저장하고 목록을 비웁니다.</td></tr>
+  <tr><th><span class="btn">비우기 (보관)</span></th><td>목록을 비웁니다. 원본은 결과 폴더의 <code>archive</code> 에 남습니다.</td></tr>
+  <tr><th><span class="btn">되돌리기</span></th><td><b>실수로 지웠을 때</b> 되살립니다.
+      <span class="muted">목록과 결과 문서는 되살아나지만, 브라우저 화면의 핀은 되살아나지 않습니다.</span></td></tr>
   <tr><th><span class="btn">지난 기록</span></th><td><b>추출·비우기로 정리한 기록을 다시 불러옵니다.</b>
-      결과 폴더의 <code>archive</code> 에서 파일을 고르면 현재 목록에 합쳐집니다.</td></tr>
-  <tr><th>목록 우클릭</th><td>화면 줄에서 <b>이 화면으로 이동</b>·<b>주소 복사</b>,
-      주석 줄에서 <b>위로/아래로</b>(<span class="k">Ctrl</span>+<span class="k">↑</span>/<span class="k">↓</span>) —
-      <b>중요한 것을 위로 올려 두면 결과 문서도 그 순서로 나옵니다.</b></td></tr>
-  <tr><th>오른쪽 위 배지</th><td>레이아웃 모드에서 배치를 바꿨으면 <b>레이아웃 변경 N</b> 이 함께 표시됩니다.</td></tr>
-  <tr><th><span class="btn">결과 폴더</span></th><td>결과 파일이 있는 폴더를 엽니다.</td></tr>
-  <tr><th><span class="btn">사용법</span></th><td>이 문서를 엽니다.</td></tr>
-  <tr><th>진행 상황</th><td>지금 무엇이 되고 있는지 알려 주는 기록. 문제가 생기면 이 내용을 그대로 전달해 주세요.</td></tr>
+      <code>archive</code> 에서 파일을 고르면 현재 목록에 합쳐집니다.</td></tr>
 </table>
 
-<div class="note"><b>같은 주소가 두 줄로 보일 때가 있습니다.</b> 브라우저 창 크기나 <b>확대 비율</b>이 달라지면
-레이아웃이 달라지므로 <b>다른 화면으로 셉니다</b>. "1920에서는 정상인데 1366에서 깨진다"가 그대로 남습니다.</div>
+<div class="note"><b>같은 주소가 두 줄로 보일 때가 있습니다.</b> 창 크기나 확대 비율이 다르면
+<b>다른 화면으로 셉니다</b> — “1920에서는 정상인데 1366에서 깨진다”가 그대로 남습니다.</div>
 
-<h2>5. 설정</h2>
+
+<h2>6. 보강 창 — 기대·우선순위·연결</h2>
+<p>화면에서 적은 메모가 <b>“현재”</b>입니다. 받는 사람이 되묻지 않게 <b>“기대”</b>와 <b>우선순위</b>를 여기서 붙입니다.</p>
+<div class="shot">
+  <img src="{{img:app-detail.png}}" alt="보강 창 — 우선순위, 기대, 보충 메모, 관련 주석">
+  <div class="cap">목록에서 <b>주석 줄을 두 번 클릭</b>하면 열립니다.</div>
+</div>
 <table>
-  <tr><th>출력 상세도</th><td>간단 / 표준 / 상세 / 정밀. 개발자가 원인을 못 찾겠다고 하면 <b>상세</b>로 올려 다시 보내세요.</td></tr>
-  <tr><th>핀 색상</th><td>화면 색과 겹쳐 핀이 안 보일 때 바꿉니다.</td></tr>
-  <tr><th>복사·전송 후 자동 비우기</th><td>복사하면 그 화면 주석을 자동으로 정리합니다.</td></tr>
-  <tr><th>페이지 클릭 차단</th><td>모드를 끈 상태에서도 페이지 클릭을 막습니다. 실수로 화면이 넘어가는 것을 방지.</td></tr>
-  <tr><th>새 탭까지 숨기기</th><td>잠깐 도구를 감춥니다.</td></tr>
-  <tr><th>MCP·웹훅</th><td>개발 연동용입니다. <b>QA 는 쓰지 않아도 됩니다.</b></td></tr>
+  <tr><th>우선순위</th><td>높음 / 보통 / 낮음. 결과 문서의 <b>목차가 이 순서로</b> 정렬됩니다.</td></tr>
+  <tr><th>기대</th><td>“이렇게 되어야 합니다”. 메모(현재)와 나눠 적으면 개발자가 되묻지 않습니다.</td></tr>
+  <tr><th>보충 메모</th><td>앞뒤 조작·재현 조건처럼 나중에 덧붙일 설명.</td></tr>
+  <tr><th>관련 주석</th><td><b>원인이 다른 화면에 있을 때</b> 연결합니다.
+      예: “A 화면의 이 값이 틀린 것은 B 화면의 저장 때문”.<br>
+      연결하면 <b>양쪽 결과에 서로를 가리키는 줄</b>이 함께 들어갑니다.</td></tr>
 </table>
+<p class="muted">목록에는 <b>[높음]</b> · <b>→기대</b> · <b>✎</b>(보충) · <b>↔숫자</b>(연결)로 표시됩니다.</p>
 
-<h2>6. 영역별로 어떻게 남기나</h2>
 
-<h3>① 버튼·글자·이미지 하나 — 두 번 클릭</h3>
-<p>마우스를 올리면 테두리와 요소 이름이 보입니다. 원하는 것에 테두리가 걸렸을 때
-<b>두 번 클릭</b>하고 메모를 적습니다. <span class="muted">한 번 클릭은 아무 일도 하지 않습니다.</span></p>
-<ul>
-  <li>원하는 것보다 <b>큰 영역</b>이 잡히면 조금 안쪽으로 옮겨 다시 올려 보세요(작은 요소가 먼저 잡힙니다).</li>
-  <li>표(그리드)의 <b>칸 하나</b>도 잡히고, 그 칸의 좌우 값까지 함께 기록됩니다.</li>
-</ul>
-<p class="muted">함께 남는 것: 요소 이름 · CSS 경로 · 클래스 · 위치와 크기 · 글꼴/크기/색 · 주변 텍스트</p>
-
-<h3>② 여러 개를 묶어서 / 빈 공간 — 드래그</h3>
-<p>빈 곳부터 <b>사각형으로 끌면</b> 그 안에 든 요소들이 한 덩이로 잡힙니다.
-"이 카드 3개 정렬이 안 맞음", "이 영역 여백이 너무 넓음" 처럼 <b>배치·간격</b> 지적에 씁니다.</p>
-
-<h3>③ 문구를 콕 집어서 — 글자 선택</h3>
-<p>글자를 마우스로 <b>드래그해 선택한 뒤</b> 남기면 그 문구가 그대로 첨부됩니다.
-오타·띄어쓰기·어색한 표현에 가장 좋습니다.</p>
-
-<h3>④ "여기서 저기로" — 화살표·자유 그림</h3>
-<p>주석 모드에서 <b>끌어서 그리면</b> 화살표나 동그라미로 표시됩니다.
-"이 버튼을 이쪽으로 옮겨 주세요" 처럼 <b>이동·순서</b>를 말할 때 씁니다.
-결과에는 <code>화살표: A → B</code>, <code>원으로 표시: …</code> 처럼 글로 남습니다.</p>
-
-<h3>⑤ 배치를 직접 바꿔 보여 주기 — 레이아웃 모드</h3>
-<p>기존 요소를 <b>끌어 옮기거나 크기를 바꿔</b> 원하는 모양을 만들어 보여 줍니다.
-결과에는 <code>제안: 이동</code>, <code>제안: 크기 변경</code> 으로 남습니다.
-<span class="muted">화면이 실제로 바뀌는 것은 아닙니다 — 새로고침하면 원래대로.</span></p>
-
-<h3>⑥ 아직 없는 화면을 설명하기 — 와이어프레임 모드</h3>
-<p>빈 캔버스에 <b>블록을 끌어다 놓아</b> 새 화면 초안을 그립니다.
-"이런 화면이 필요합니다" 를 말로 설명하기 어려울 때 씁니다.</p>
-
-<h3>⑦ 앞뒤 사정을 덧붙이기 · 다른 화면과 엮기 — 프로그램 창에서</h3>
-<p>화면을 옮겨 다니며 조작하다 보면 <b>원인이 다른 화면에 있는</b> 경우가 많습니다.
-예: "A 화면의 이 값이 틀린 것은 B 화면의 저장 기능 때문". 그럴 때 프로그램 창에서 엮습니다.</p>
-<ol class="steps">
-  <li>목록에서 화면을 펼쳐 <b>주석 줄을 더블클릭</b>합니다.</li>
-  <li><b>우선순위</b>를 고르고, <b>기대</b>에 "이렇게 되어야 합니다" 를 적습니다.
-      <span class="muted">화면에서 적은 메모가 <b>현재</b>, 여기가 <b>기대</b> 입니다 — 받는 사람이 되묻지 않습니다.</span></li>
-  <li><b>보충 메모</b>에 앞뒤 조작·재현 조건을 적습니다.</li>
-  <li><b>[연결 추가]</b> 로 원인이 되는 다른 주석을 고릅니다.</li>
-</ol>
-<p>결과 문서에는 <b>양쪽 모두</b>에 서로를 가리키는 줄이 들어갑니다 —
-어느 쪽을 먼저 읽어도 관계가 보입니다. 목록에는 <b>✎</b>(보충 있음) ·
-<b>↔숫자</b>(연결 수) 로 표시됩니다.</p>
-<p class="muted">주석마다 <b>남긴 시각</b>도 결과에 함께 적힙니다 — 이어지는 조작의 순서가 그대로 남습니다.</p>
-
-<div class="note"><b>어떤 것을 쓸지 모르겠으면 ①과 ③만 쓰세요.</b> 실제 QA 의 대부분은 그 둘로 끝납니다.</div>
-
-<h2>7. 결과에는 무엇이 담기나</h2>
+<h2>7. 결과에 담기는 것</h2>
 <table>
-  <tr><th>화면 정보</th><td>주소 · 제목 · 해상도와 확대비율 · 처음/마지막 시각 · 어디서 왔는지 · <code>iframe</code> 안이었는지</td></tr>
-  <tr><th>주석마다</th><td>요소 이름 · 메모 · <b>남긴 시각</b> · CSS 경로 · 클래스 · 위치/크기 · 글꼴·크기·색 · 선택한 문구 · 주변 텍스트<br>
-      적어 두었다면 <b>보충</b> 메모와 <b>관련</b>(다른 화면 주석과의 연결)도 함께</td></tr>
-  <tr><th>문서 맨 앞</th><td><b>총평</b> — [클립보드 복사]·[추출] 때 적은 마지막 코멘트<br>
-      이어서 <b>항목 목차</b>(한 줄씩, <b>우선순위순</b>) — <b>이슈 댓글에 그대로 붙이면 됩니다.</b><br>
-      <span class="muted">높음 → 보통 → 미지정 → 낮음 순입니다. '낮음' 은 나중에 해도 된다고 정한 것이라 맨 뒤로 갑니다.</span></td></tr>
-  <tr><th>화면마다</th><td><b>색 기준</b> — 그 화면이 다크였는지 라이트였는지. 색 지적을 받는 사람이
-      어떤 테마의 값인지 알 수 있습니다.</td></tr>
-  <tr><th>묶어 잡은 주석</th><td><b>정렬·크기·세로 간격</b>을 숫자로 적습니다(예: 폭 200/200/196 — 최대 4px 차이).
-      <b>"정렬이 안 맞는다" 를 그림 없이 전달하기 위한 것입니다.</b></td></tr>
-  <tr><th>덧붙는 것</th><td>그 화면에서 난 <b>콘솔 오류</b>와 <b>실패한 요청</b>(개발자가 원인 찾는 데 큰 도움).
-      favicon 같은 잡음은 빼고 담습니다.</td></tr>
+  <tr><th>문서 맨 앞</th><td><b>총평</b> + <b>항목 목차</b>(한 줄씩, 우선순위순) —
+      <b>이슈 댓글에 그대로 붙이면 됩니다.</b></td></tr>
+  <tr><th>화면마다</th><td>주소 · 제목 · 해상도와 확대비율 · 시각 · <b>색 기준</b>(다크/라이트) ·
+      그 화면의 <b>콘솔 오류·실패한 요청</b></td></tr>
+  <tr><th>주석마다</th><td>요소 이름 · 메모 · <b>기대</b> · <b>우선순위</b> · 시각 ·
+      CSS 경로 · 위치/크기 · 글꼴·색 · <b>보충</b> · <b>관련</b></td></tr>
+  <tr><th>묶어 잡았으면</th><td><b>정렬·크기·세로 간격을 숫자로</b>
+      (예: 폭 200/200/196 — 최대 4px 차이) — “정렬이 안 맞는다”를 그림 없이 전합니다.</td></tr>
 </table>
-<p class="muted">저장 위치: <code>%LOCALAPPDATA%\qa-annotator\out</code> — <code>latest.md</code>(전달용),
-<code>annotations.jsonl</code>(원본), <code>archive</code>(이전 기록)</p>
+<p class="muted">저장 위치: <code>%LOCALAPPDATA%\qa-annotator\out</code> —
+<code>latest.md</code>(전달용) · <code>annotations.jsonl</code>(원본) · <code>archive</code>(이전 기록)</p>
 
-<h2>8. 이럴 때는 이렇게</h2>
+
+<h2>8. 막힐 때</h2>
 <table>
   <tr><th>메뉴·링크가 안 눌린다</th>
-      <td><b>주석 모드가 켜져 있는 것입니다.</b> <span class="k">Esc</span> 로 끄고 이동하세요(3절).
-          관리자 화면이면 좌측 메뉴는 그대로 눌립니다.</td></tr>
+      <td><b>주석 모드가 켜져 있습니다.</b> <span class="k">Esc</span> 로 끄고 이동하세요.</td></tr>
+  <tr><th>한 번 클릭했는데 아무 일이 없다</th>
+      <td><b>두 번 클릭</b>해야 메모창이 열립니다(2절).</td></tr>
+  <tr><th>팝업 안을 못 고른다</th>
+      <td>팝업을 <b>먼저 열고</b> 주석 모드를 켜세요. 켠 뒤 1초쯤 기다립니다(3절).</td></tr>
+  <tr><th><span class="k">Esc</span> 를 눌렀는데 아무 일이 없다</th>
+      <td>팝업이 열려 있으면 <b>일부러 막습니다.</b> 둥근 버튼으로 모드를 켜세요.</td></tr>
   <tr><th>우측 아래 버튼이 안 보인다</th>
-      <td>2~3초 기다려 보세요. 그래도 없으면 배지가 <b>주입됨</b> 인지 확인 →
-          아니면 <span class="btn">QA 시작</span> 을 한 번 더.
-          <span class="muted">브라우저 설정 페이지(chrome://…)나 PDF 화면에서는 뜨지 않습니다.</span></td></tr>
+      <td>2~3초 기다린 뒤 배지가 <b>주입됨</b>인지 확인 → 아니면 <span class="btn">QA 시작</span>을 한 번 더.
+      <span class="muted">브라우저 설정 페이지·PDF 화면에서는 뜨지 않습니다.</span></td></tr>
   <tr><th>목록에 안 쌓인다</th>
-      <td>주석 도구가 <b>프로그램이 띄운 창</b>에 있어야 합니다. 평소 쓰는 브라우저 창에서는 수집되지 않습니다.</td></tr>
-  <tr><th>지난 주석·핀이 계속 보인다</th>
-      <td><span class="btn">비우기</span> 를 한 번 누르세요. 프로그램과 브라우저 양쪽이 함께 비워집니다.</td></tr>
-  <tr><th>"이미 실행 중입니다"</th>
-      <td>창이 하나만 떠야 합니다(여러 개면 결과가 섞입니다). 작업표시줄의 기존 창을 쓰세요.</td></tr>
-  <tr><th>"전용 브라우저가 이미 열려 있는데…"</th>
-      <td>그 브라우저 창을 닫고 다시 <span class="btn">QA 시작</span>. 평소 브라우저는 닫지 않아도 됩니다.</td></tr>
-  <tr><th>"크롬이나 엣지를 찾지 못했습니다"</th>
-      <td>윈도우 10/11 이면 엣지가 기본으로 있습니다. 시작 메뉴에서 Edge 를 한 번 실행한 뒤 다시 시도하세요.</td></tr>
-  <tr><th>로그인이 풀렸다</th>
-      <td>전용 브라우저의 세션이 만료된 것입니다. 그 창에서 다시 로그인하면 이후 유지됩니다.</td></tr>
-  <tr><th>붙여넣었는데 비어 있다</th>
-      <td><span class="btn">클립보드 복사</span> 를 다시 누르세요. 진행 상황에 "창을 닫아도 유지됩니다" 가 찍히면 정상입니다.</td></tr>
-  <tr><th>핀 위치가 살짝 어긋난다</th>
-      <td>페이지를 스크롤하거나 창 크기를 바꾸면 그럴 수 있습니다. 메모 내용과 기록된 CSS 경로는 정확하니
-          전달에는 문제가 없습니다.</td></tr>
-  <tr><th>모달(팝업) 안을 못 고른다</th>
-      <td>팝업을 먼저 열고 <b>그다음에</b> 주석 모드를 켜세요(3절). 켠 뒤 <b>1초쯤</b> 기다리면
-          도구가 팝업 위로 올라갑니다. 팝업 안이 또 다른 <code>iframe</code> 이면 고를 수 없습니다.</td></tr>
-  <tr><th>Esc 를 눌렀는데 아무 일도 없다</th>
-      <td>팝업이 열려 있으면 <b>일부러 막습니다</b>(지적하려던 팝업이 닫히지 않게).
-          모드를 끄려면 툴바의 <b>나가기</b> 를 누르세요.</td></tr>
+      <td>도구가 <b>프로그램이 띄운 창</b>에 있어야 합니다. 평소 쓰는 브라우저 창에서는 수집되지 않습니다.</td></tr>
+  <tr><th>실수로 지웠다</th><td><span class="btn">되돌리기</span> 를 누르세요.</td></tr>
+  <tr><th>추출한 걸 다시 봐야 한다</th><td><span class="btn">지난 기록</span> → <code>archive</code> 에서 고르기.</td></tr>
   <tr><th>그 외 오류</th>
       <td>결과 폴더의 <code>crash.log</code> 와 프로그램 창의 <b>진행 상황</b> 내용을 그대로 전달해 주세요.</td></tr>
 </table>
 
+
 <h2>9. 알아두면 좋은 것</h2>
 <ul>
-  <li><b>브라우저에 설치되는 것이 없습니다</b> — 북마크·확장·인증서 전부 없음. 프로그램을 지우면 흔적도 끝.</li>
+  <li><b>스크린샷을 붙이지 않아도 됩니다.</b> 그림 대신 CSS 경로·좌표·글꼴·색·정렬 숫자가 들어갑니다 —
+      개발자와 AI 가 그 값으로 코드를 찾습니다.</li>
+  <li><b>브라우저에 설치되는 것이 없습니다</b> — 북마크·확장·인증서 전부 없음.</li>
   <li><b>전용 브라우저 창</b>이라 평소 쓰는 브라우저의 로그인·북마크와 섞이지 않습니다.</li>
-  <li><b>어떤 사이트에서나</b> 됩니다. 사이트에 무엇을 심지 않습니다.</li>
   <li>주석은 <b>메모를 다는 즉시</b> 프로그램으로 넘어갑니다. 따로 [보내기] 를 누를 필요가 없습니다.</li>
   <li>프로그램을 닫았다 켜도 <b>지난 목록이 복원</b>됩니다.</li>
-  <li><b>스크린샷은 붙이지 않습니다.</b> 그림 대신 CSS 경로·좌표·계산된 스타일·정렬 숫자로 넘깁니다 —
-      개발자·AI 가 그 값으로 코드를 찾습니다. 그림을 따로 붙이실 필요가 없습니다.</li>
 </ul>
 
 <hr>
