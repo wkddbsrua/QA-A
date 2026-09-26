@@ -1,0 +1,46 @@
+# 화면주석-QA — Claude 작업 규칙
+
+비개발자 QA/기획자가 아무 사이트에서나 화면을 클릭해 지적을 남기는 범용 도구.
+UI·기능은 agentation 원본, 화면 문구만 한글. **CMS 프로젝트와 무관한 독립 도구다.**
+
+## 착수 전 필독
+- `README.md` — 특히 **"iframe(셸 구조)에서 지킬 것" 7개 항목**. 사고가 거기서 다 터졌다.
+- 사용자용 문서는 `docs/사용법.src.html` → `python docs/make_help.py` 로 생성(생성물 직접 수정 금지).
+
+## 되돌아가지 말 것 (이미 실패한 경로)
+주입은 **CDP** 로만 한다 — `Page.addScriptToEvaluateOnNewDocument` + `Runtime.addBinding`.
+북마크릿 · 브라우저 확장 · 유저스크립트 · 로컬 싱크서버로 되돌아가지 않는다(이유는 README).
+
+## 범위 규칙
+- **VRT(해상도 순회·캡처 비교)를 넣지 않는다.** 해상도는 기록·분리만 한다.
+  화면 하나의 정체성은 `(주소, 해상도)` — URL 로만 묶으면 1920/1366 결과가 합쳐져 증거가 사라진다.
+- 새 기능은 붙이기 전에 "이게 이 도구의 일인가" 를 먼저 판단한다.
+  증상마다 버튼을 늘리는 것이 사용자가 가장 싫어한 결과다.
+
+## 진단 규칙
+"안 되는데?" 를 들으면 추측하지 말고 **그 브라우저에 CDP 로 붙어 DOM 을 본다** —
+`document.__qaDoc` · `window.__qaInjected` · `window.__qaReady` · `<style>` 개수 ·
+툴바 computed `position`. 스냅샷 한 장으로는 계속 헛짚었고, **시간에 따라 추적**해야 갈린다.
+
+## 한글화
+`ko.strings.json` 한 파일 + `python build_ko.py` 게이트(못찾음·개수불일치·잔존영문 전부 0).
+**allow 목록에 넣어 조용히 면제하지 말 것** — 그렇게 `Webhooks` 를 놓쳤다.
+
+## 다른 PC 전제
+배포 PC 에는 파이썬·node·esbuild 가 없다. 해상도·DPI·Windows 언어·설치 브라우저도 다르다.
+이 PC 기준으로 짜지 말 것(README "기기마다 다른 것" 표).
+
+## 빌드
+```
+python build_ko.py      # 한글 문구 주입 → vendor/agentation.ko.mjs
+python build_inject.py  # esbuild 번들 → dist/inject.js
+python build_exe.py     # PyInstaller → release/화면주석-QA.exe (산출물 존재 검사 포함)
+```
+로컬 확인 도구: python 3.14 · node 25 · esbuild 0.28.2 · PyInstaller 6.20.
+
+## 테스트 격리
+★**테스트 주석을 `%LOCALAPPDATA%\qa-annotator\out` 에 남기지 말 것** — 사용자 결과에 섞인 사고가 있다.
+스크래치패드 전용 폴더를 쓴다.
+
+## 커밋
+`git commit -m "…" -- <경로…>` 로 경로 지정. `--amend`/`--no-verify` 금지(전역 규칙과 동일).
