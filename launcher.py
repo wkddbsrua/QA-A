@@ -15,8 +15,11 @@
   Runtime.addBinding('__qaPush') - 페이지에서 부르면 CDP 로 곧장 프로그램에 온다.
   네트워크를 쓰지 않으므로 https 여부와 무관하다.
 """
+import base64
 import json
+import math
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -221,6 +224,10 @@ class Launcher(object):
         self._worker = threading.Thread(target=self._work, name='qa-setup')
         self._worker.daemon = True
         self._worker.start()
+        # 1.2: 캡처·잘라 붙이기는 한 번에 하나만(우리 UI 를 숨겼다 되살리는 동안 겹치면 안 된다)
+        self._busy = threading.Lock()
+        # 보강 창이 부른 잘라 붙이기가 끝났을 때 알릴 곳: on_snip(aid, fname)
+        self.on_snip = None
 
     def _work(self):
         while not self._stop:
@@ -554,6 +561,12 @@ class Launcher(object):
             # 브3: 레이아웃 모드에서 옮긴 것. 주석이 아니므로 store.apply 로
             #   보내지 않는다(빈 annotations 로 들어가면 '주석 이벤트' 로 잘못 남는다).
             self.store.set_layout(payload)
+            return
+        if payload.get('kind') == 'snip':
+            # 1.2: 사람이 화면에서 고른 영역. 찍는 것은 여기(CDP) - ★수신 스레드에서 기다리면
+            #   안 되므로 작업 큐로 넘긴다.
+            ctx = params.get('executionContextId')
+            self._jobs.put(lambda: self._do_snip(sid, ctx, payload))
             return
         # 브8: 메모창에 붙인 그림. ★jsonl 에 base64 를 남기지 않는다 - store.apply
         #   전에 떼어내고 store.add_images() 로 파일로만 저장한다.
@@ -1048,6 +1061,344 @@ class Launcher(object):
                 except Exception:
                     continue
         return total
+
+    # ── 1.2: 화면 단위 캡처 · 영역 잘라 붙이기 ─────────────────────────
+    # ★실측(크롬 151): Page.captureScreenshot 의 clip 은 '문서 좌표' 다(뷰포트가 아니다).
+    #   captureBeyondViewport 전체 캡처에서도 position:fixed 는 현재 스크롤 위치에 찍힌다 -
+    #   그래서 전체 캡처는 문서를 맨 위로 올린 뒤 찍는다(inject 의 begin()).
+    TILE_BASE = 15000           # 한 장의 최대 픽셀 높이(GPU 텍스처 상한 16384 아래). CSS 높이는 /dpr
+    MAX_TILES = 6
+
+    def _eval(self, sid, ctx, expr, timeout=8):
+        """그 문서(컨텍스트)에서 식을 평가해 값을 돌려준다. 예외는 RuntimeError."""
+        params = {'expression': expr, 'returnByValue': True, 'awaitPromise': True}
+        if ctx is not None:
+            params['contextId'] = ctx
+        r = self.cdp.call('Runtime.evaluate', params, session_id=sid, timeout=timeout) or {}
+        if r.get('exceptionDetails'):
+            d = r['exceptionDetails']
+            raise RuntimeError((d.get('exception') or {}).get('description') or d.get('text') or 'JS 오류')
+        return (r.get('result') or {}).get('value')
+
+    def find_documents(self):
+        """떠 있는 모든 문서의 위치 정보. [{sid, ctx, frame_id, root, url, vp, top, dpr, sw, sh, offset}]"""
+        out = []
+        probe = ('(function(){try{return window.__qaCapture?window.__qaCapture.where():null;}'
+                 'catch(e){return null;}})()')
+        for s in list(self.sessions.values()):
+            if s.type not in ('page', 'iframe'):
+                continue
+            for fid, ctx in (list(s.contexts.items()) or [(None, None)]):
+                try:
+                    w = self._eval(s.sid, ctx, probe, timeout=5)
+                except Exception:
+                    continue
+                if not w:
+                    continue
+                w.update({'sid': s.sid, 'ctx': ctx, 'frame_id': fid, 'root': self._root_sid(s.sid)})
+                out.append(w)
+        return out
+
+    def find_document(self, url, viewport):
+        """(문서, 못 찾은 이유). 화면 키 (주소, 해상도) 와 정확히 맞는 문서를 찾는다."""
+        same_url = []
+        for d in self.find_documents():
+            if d.get('url') != url:
+                continue
+            if not viewport or viewport == '?' or d.get('vp') == viewport:
+                return d, ''
+            same_url.append(d.get('vp'))
+        if same_url:
+            return None, u'같은 주소가 다른 해상도(%s)로 열려 있습니다' % u'·'.join(same_url)
+        return None, u'그 화면이 열려 있지 않습니다'
+
+    def _shot(self, sid, x, y, w, h, beyond=True):
+        """PNG 바이트. clip 은 문서 좌표(CSS px), scale 1 = 기기 픽셀."""
+        params = {'format': 'png', 'fromSurface': True, 'captureBeyondViewport': bool(beyond),
+                  'clip': {'x': float(x), 'y': float(y), 'width': float(w), 'height': float(h),
+                           'scale': 1}}
+        r = self.cdp.call('Page.captureScreenshot', params, session_id=sid, timeout=90) or {}
+        if not r.get('data'):
+            raise RuntimeError('캡처 응답이 비었습니다')
+        return base64.b64decode(r['data'])
+
+    def _frame_owner(self, sid, ctx):
+        """(소유 문서의 세션, <iframe> 요소 objectId). 교차출처 iframe 의 요소를 부모 문서에서 잡는다.
+
+        ★두 경우가 있다. OOPIF(별도 프로세스)면 부모 '세션' 에서, 같은 프로세스의 교차출처
+          프레임(file:// 끼리 · 사이트 격리가 꺼진 경우)이면 **같은 세션** 의 DOM 에서 찾는다 -
+          한 세션이 프레임 트리 전체를 갖고 있기 때문이다."""
+        s = self.sessions.get(sid)
+        if s is None:
+            return None, None
+        fids = [f for f, c in s.contexts.items() if c == ctx] or list(s.contexts.keys())
+        if not fids:
+            return None, None
+        cands = []
+        if s.parent and s.parent in self.sessions:
+            cands.append(s.parent)
+        cands.append(sid)
+        for osid in cands:
+            try:
+                owner = self.cdp.call('DOM.getFrameOwner', {'frameId': fids[0]},
+                                      session_id=osid, timeout=8)
+                node = self.cdp.call('DOM.resolveNode', {'backendNodeId': owner['backendNodeId']},
+                                     session_id=osid, timeout=8)
+                oid = (node.get('object') or {}).get('objectId')
+                if oid:
+                    return osid, oid
+            except Exception:
+                continue
+        return None, None
+
+    # <iframe> 요소의 자리(그 요소가 사는 문서의 뷰포트 기준) + 같은 출처 조상 프레임 오프셋까지
+    _OWNER_POS_JS = ('function(){var r=this.getBoundingClientRect();'
+                     'var x=r.left+(this.clientLeft||0),y=r.top+(this.clientTop||0);'
+                     'try{var w=this.ownerDocument.defaultView;'
+                     'while(w&&w!==w.parent){var fe=w.frameElement;if(!fe)break;'
+                     'var rr=fe.getBoundingClientRect();x+=rr.left+(fe.clientLeft||0);'
+                     'y+=rr.top+(fe.clientTop||0);w=w.parent;}}catch(e){}'
+                     'return [x,y];}')
+
+    def _frame_offset_oopif(self, sid, ctx):
+        """교차출처 iframe 문서의 뷰포트 좌표를 최상위 뷰포트 좌표로 옮기는 오프셋. 못 구하면 None."""
+        x = y = 0.0
+        cur, cctx = sid, ctx
+        for _ in range(4):                          # 중첩은 몇 단만
+            psid, oid = self._frame_owner(cur, cctx)
+            if not oid:
+                return None if (cur == sid) else {'x': x, 'y': y}
+            try:
+                r = self.cdp.call('Runtime.callFunctionOn', {
+                    'objectId': oid, 'returnByValue': True,
+                    'functionDeclaration': self._OWNER_POS_JS}, session_id=psid, timeout=8)
+                v = (r.get('result') or {}).get('value') or [0, 0]
+                x += float(v[0])
+                y += float(v[1])
+            except Exception:
+                return None
+            if psid == cur:
+                break                               # 같은 세션 안에서 찾았다 - 최상위까지 왔다
+            cur, cctx = psid, None
+            if not (self.sessions.get(cur) and self.sessions[cur].parent):
+                break
+        return {'x': x, 'y': y}
+
+    def _expand_oopif(self, sid, ctx, height):
+        """교차출처 iframe 의 높이를 부모 문서에서 늘린다. 되돌릴 정보 또는 None."""
+        psid, oid = self._frame_owner(sid, ctx)
+        if not oid:
+            return None
+        try:
+            r = self.cdp.call('Runtime.callFunctionOn', {
+                'objectId': oid, 'returnByValue': True, 'arguments': [{'value': int(height)}],
+                'functionDeclaration': 'function(h){var o={h:this.style.height,mx:this.style.maxHeight,'
+                                       'mn:this.style.minHeight};this.style.height=h+"px";'
+                                       'this.style.maxHeight="none";this.style.minHeight="0";return o;}'},
+                session_id=psid, timeout=8)
+            return {'sid': psid, 'oid': oid, 'saved': (r.get('result') or {}).get('value') or {}}
+        except Exception:
+            return None
+
+    def _restore_oopif(self, info):
+        try:
+            self.cdp.call('Runtime.callFunctionOn', {
+                'objectId': info['oid'], 'arguments': [{'value': info['saved']}],
+                'functionDeclaration': 'function(o){this.style.height=o.h||"";'
+                                       'this.style.maxHeight=o.mx||"";this.style.minHeight=o.mn||"";}'},
+                session_id=info['sid'], timeout=8)
+        except Exception:
+            pass
+
+    @staticmethod
+    def capture_basename(screen_no, url, viewport):
+        """'02_admin-content-list_1920x1080' - 파일만 봐도 어느 화면인지 읽히게."""
+        try:
+            from urllib.parse import urlsplit
+            path = urlsplit(url or '').path or '/'
+        except Exception:
+            path = '/'
+        slug = re.sub(r'[^A-Za-z0-9가-힣]+', '-', path).strip('-')[:40] or 'root'
+        return '%02d_%s_%s' % (int(screen_no), slug, (viewport or '?').replace('x', 'x'))
+
+    def capture_screen(self, target, dest_dir):
+        """화면 하나를 통째로 찍는다(핀 오버레이 포함). 화면당 1벌.
+
+        target = {key, screen, url, viewport, pins}.
+        돌려주는 값: {'ok': True, files, partial, reason, css_w, css_h, dpr} 또는 {'ok': False, reason}.
+        ★Store.lock 을 잡지 않은 채 부른다(CDP 응답을 기다린다). 결과 저장은 부르는 쪽이."""
+        doc, why = self.find_document(target['url'], target['viewport'])
+        if not doc:
+            return {'ok': False, 'reason': why}
+        sid, ctx, root = doc['sid'], doc['ctx'], doc['root']
+        if not os.path.isdir(dest_dir):
+            os.makedirs(dest_dir)
+        base = self.capture_basename(target.get('screen') or 0, target['url'], target['viewport'])
+        pins_js = json.dumps(target.get('pins') or {}, ensure_ascii=False)
+        with self._busy:
+            begun = expanded = False
+            oopif = None
+            root_scroll = None
+            try:
+                info = self._eval(sid, ctx, 'window.__qaCapture.begin(%s)' % pins_js, timeout=15) or {}
+                begun = True
+                partial, reason = False, u''
+                if not doc.get('top'):
+                    # iframe 화면: 프레임을 문서 높이만큼 늘려야 아래쪽까지 찍힌다.
+                    if self._eval(sid, ctx, 'window.__qaCapture.expand(%d)' % int(info.get('sh') or 0),
+                                  timeout=8):
+                        expanded = True
+                    else:
+                        oopif = self._expand_oopif(sid, ctx, info.get('sh') or 0)
+                        if not oopif:
+                            partial, reason = True, u'iframe 확장 불가'
+                    # 최상위 문서도 맨 위로(고정 요소가 현재 스크롤 자리에 찍힌다 - 위 실측)
+                    try:
+                        root_scroll = self._eval(root, None, '(function(){var s=[scrollX,scrollY];'
+                                                             'scrollTo(0,0);return s;})()', timeout=5)
+                    except Exception:
+                        root_scroll = None
+                    time.sleep(0.35)                  # 레이아웃 반영
+                else:
+                    time.sleep(0.15)
+                metrics = self.cdp.call('Page.getLayoutMetrics', session_id=root, timeout=10) or {}
+                cs = metrics.get('cssContentSize') or metrics.get('contentSize') or {}
+                css_w = int(math.ceil(cs.get('width') or info.get('sw') or 0))
+                css_h = int(math.ceil(cs.get('height') or info.get('sh') or 0))
+                if doc.get('top') and info.get('sh'):
+                    css_h = max(css_h, int(info['sh']))
+                dpr = float(info.get('dpr') or doc.get('dpr') or 1)
+                tile = max(1000, int(self.TILE_BASE // dpr))
+                n = max(1, int(math.ceil(css_h / float(tile))))
+                if n > self.MAX_TILES:
+                    n = self.MAX_TILES
+                    partial = True
+                    reason = (reason + u' · ' if reason else u'') + u'페이지가 너무 길어 %d장까지만' % n
+                files = []
+                y = 0
+                for i in range(n):
+                    h = min(tile, css_h - y)
+                    if h <= 0:
+                        break
+                    try:
+                        png = self._shot(root, 0, y, css_w, h)
+                        parts = [(png, h)]
+                    except Exception:
+                        # 한 번만 절반으로 나눠 다시 찍는다(텍스처 상한·메모리)
+                        half = int(math.ceil(h / 2.0))
+                        parts = [(self._shot(root, 0, y, css_w, half), half),
+                                 (self._shot(root, 0, y + half, css_w, h - half), h - half)]
+                    for png, _ph in parts:
+                        k = len(files) + 1
+                        fn = '%s-%d.png' % (base, k) if (n > 1 or len(parts) > 1) else '%s.png' % base
+                        with open(os.path.join(dest_dir, fn), 'wb') as f:
+                            f.write(png)
+                        files.append(fn)
+                    y += h
+                # 옛 타일이 남지 않게(장수가 줄어든 경우)
+                for fn in os.listdir(dest_dir):
+                    if fn.startswith(base) and fn not in files and fn.endswith('.png'):
+                        try:
+                            os.remove(os.path.join(dest_dir, fn))
+                        except Exception:
+                            pass
+                return {'ok': True, 'files': files, 'partial': partial, 'reason': reason,
+                        'css_w': css_w, 'css_h': css_h, 'dpr': dpr,
+                        'pins': dict((aid, p.get('label')) for aid, p in (target.get('pins') or {}).items())}
+            finally:
+                if begun:
+                    try:
+                        self._eval(sid, ctx, 'window.__qaCapture.end()', timeout=8)
+                    except Exception:
+                        pass
+                if expanded:
+                    try:
+                        self._eval(sid, ctx, 'window.__qaCapture.restore()', timeout=8)
+                    except Exception:
+                        pass
+                if oopif:
+                    self._restore_oopif(oopif)
+                if root_scroll:
+                    try:
+                        self._eval(root, None, 'scrollTo(%d,%d)' % (int(root_scroll[0]), int(root_scroll[1])),
+                                   timeout=5)
+                    except Exception:
+                        pass
+
+    def request_snip(self, aid, url, viewport, path='', box=None, fixed=False):
+        """보강 창에서 부른 '화면에서 잘라 붙이기'. 그 화면이 열려 있으면 선택 오버레이를 띄운다.
+        (시작 여부, 이유). 결과는 나중에 binding('snip') 으로 온다."""
+        doc, why = self.find_document(url, viewport)
+        if not doc:
+            return False, why
+        opts = {'target': aid, 'path': path or '', 'fixed': bool(fixed)}
+        if isinstance(box, dict):
+            opts['box'] = box
+        token = 'a%d' % int(time.time() * 1000)
+        try:
+            ok = self._eval(doc['sid'], doc['ctx'],
+                            'window.__qaSnip(%s, %s)' % (json.dumps(token), json.dumps(opts, ensure_ascii=False)),
+                            timeout=8)
+        except Exception as e:
+            return False, str(e)
+        return bool(ok), u'' if ok else u'그 문서에서 선택을 시작하지 못했습니다'
+
+    def _do_snip(self, sid, ctx, payload):
+        """binding('snip') - 사람이 고른 영역을 그 탭의 최상위 세션에서 찍는다(작업 스레드)."""
+        token = payload.get('token') or ''
+        target = payload.get('target') or 'popup'
+        rect = payload.get('rect') or {}
+        root = self._root_sid(sid)
+
+        def done(ok, data_url=None):
+            try:
+                self._eval(sid, ctx, 'window.__qaSnipDone(%s, %s, %s)'
+                           % (json.dumps(token), 'true' if ok else 'false',
+                              json.dumps(data_url) if data_url else 'null'), timeout=15)
+            except Exception:
+                pass
+
+        try:
+            with self._busy:
+                off = payload.get('offset')
+                if off is None and not payload.get('top'):
+                    off = self._frame_offset_oopif(sid, ctx)
+                    if off is None:
+                        self.log('잘라 붙이기: iframe 위치를 구하지 못해 그대로 찍습니다.')
+                        off = {'x': 0, 'y': 0}
+                elif off is None:
+                    off = {'x': 0, 'y': 0}
+                # 뷰포트 좌표 → 문서 좌표(최상위 스크롤을 더한다). clip 은 문서 좌표다(실측).
+                metrics = self.cdp.call('Page.getLayoutMetrics', session_id=root, timeout=10) or {}
+                lv = metrics.get('cssLayoutViewport') or {}
+                px = float(lv.get('pageX') or 0)
+                py = float(lv.get('pageY') or 0)
+                x = float(rect.get('x') or 0) + float(off.get('x') or 0) + px
+                y = float(rect.get('y') or 0) + float(off.get('y') or 0) + py
+                w = max(1.0, float(rect.get('w') or 0))
+                h = max(1.0, float(rect.get('h') or 0))
+                png = self._shot(root, x, y, w, h, beyond=False)
+        except Exception as e:
+            self.log('잘라 붙이기 실패: %s' % e)
+            done(False)
+            return
+        if target == 'popup':
+            done(True, 'data:image/png;base64,' + base64.b64encode(png).decode('ascii'))
+            self.log('화면 일부를 잘라 메모창에 붙였습니다 (%dx%d).' % (int(w), int(h)))
+            return
+        try:
+            fname = self.store.add_image_bytes(target, png, '.png')
+        except Exception as e:
+            self.log('잘라 붙이기 저장 실패: %s' % e)
+            done(False)
+            return
+        done(True)
+        self.log('화면 일부를 잘라 첨부했습니다 - %s (%dx%d)' % (fname, int(w), int(h)))
+        if self.on_snip:
+            try:
+                self.on_snip(target, fname)
+            except Exception:
+                pass
 
     def _head(self):
         """주입 앞에 얹는 설정 스위치. 이미 주입된 문서에는 이것만 다시 얹는다."""

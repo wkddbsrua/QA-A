@@ -12,17 +12,51 @@
 
 출력 2종
   latest.md         사람이 읽고 그대로 전달하는 형식
-  annotations.jsonl 들어온 이벤트 원본. 프로그램을 다시 켜면 이걸 재생해 목록을 복원한다.
+  qa.sqlite         들어온 이벤트 원본(회차별). 프로그램을 다시 켜면 현재 회차를 재생해 목록을 복원한다.
+                    (1.1 까지는 annotations.jsonl 이었다 - 첫 실행 때 qadb.migrate_legacy 가 옮긴다)
+
+회차(round, 1.2)
+  [비우기]·[추출] 은 현재 회차를 닫고 새 회차를 연다. 지난 회차는 **읽기 전용**(RoundView) -
+  현재 목록에 합치지 않는다. 합치면 총평·순서·메타가 옛 값으로 덮인다(실사용 불만의 원인).
 """
 import io
 import json
 import os
 import re
+import shutil
 import threading
 
+import qadb
 import version as VER
 from collections import OrderedDict
 from datetime import datetime
+
+ReadOnlyRound = qadb.ReadOnlyRound
+
+# 첨부 종류 - 확장자로만 가른다(동영상은 사람이 Win+Alt+R 로 찍은 파일이다. 도구는 녹화하지 않는다).
+VIDEO_EXT = ('.mp4', '.webm', '.mov', '.mkv', '.avi')
+IMAGE_EXT = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp')
+
+
+def attach_kind(fname):
+    ext = os.path.splitext(fname or '')[1].lower()
+    if ext in VIDEO_EXT:
+        return 'video'
+    if ext in IMAGE_EXT:
+        return 'image'
+    return 'file'
+
+
+def human_size(n):
+    try:
+        n = float(n)
+    except Exception:
+        return u''
+    for unit in (u'B', u'KB', u'MB', u'GB'):
+        if n < 1024 or unit == u'GB':
+            return (u'%d %s' % (n, unit)) if unit == u'B' else (u'%.1f %s' % (n, unit))
+        n /= 1024.0
+    return u''
 
 NOISE_CAP = 50          # 화면당 콘솔 에러·실패 요청 보관 상한(그 이상은 오래된 것부터 버린다)
 API_CAP = 20            # 화면당 '작은 응답' 보관 상한. 실패 기록과 별도 목록이어야 한다
@@ -254,57 +288,30 @@ def _spot_url(url):
         return (url or '').split('?')[0]
 
 
-def _round_label(name):
-    """'20260821-114544-annotations.jsonl' -> '2026-08-21 11:45'"""
-    m = re.match(r'(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})', name or '')
-    if not m:
-        return (name or '').split('-')[0]
-    return u'%s-%s-%s %s:%s' % m.groups()
-
-
-def _spots_of(path):
-    """회차 파일 하나가 남긴 (주소, 경로) 자리들. 나중에 지운 주석은 빼고 센다."""
-    alive = OrderedDict()                       # id -> (주소, 경로)
-    try:
-        with io.open(path, encoding='utf-8') as f:
-            raw = [l for l in f if l.strip()]
-    except Exception:
-        return []
-    for line in raw:
-        try:
-            rec = json.loads(line)
-        except Exception:
-            continue
-        if not rec or rec.get('t') != 'annotation':
-            continue
-        pl = rec.get('payload') or {}
-        anns = pl.get('annotations') or []
-        kind = pl.get('kind')
-        if kind == 'delete':
-            for a in anns:
-                alive.pop(a.get('id'), None)
-        elif kind == 'clear':
-            pid = _page_id(pl.get('url'))
-            for aid in [k for k, v in alive.items() if _page_id(v[0]) == pid]:
-                alive.pop(aid, None)
-        else:
-            url = _spot_url(pl.get('url'))
-            for a in anns:
-                path_sel = a.get('elementPath')
-                if a.get('id') and path_sel:
-                    alive[a['id']] = (url, path_sel)
-    return list(alive.values())
+def _round_title(row):
+    """회차 한 줄 표기: '3회차 · 2026-08-21 11:45'. 지난 회차 창·재지적 줄에 같은 문자열이 나간다."""
+    if row is None:
+        return u''
+    when = (row['closed_at'] or row['started_at'] or u'')[:16]
+    return u'%d회차 · %s' % (int(row['seq'] or 0), when)
 
 
 class Store(object):
-    def __init__(self, out_dir):
+    """현재(열린) 회차. 지난 회차는 RoundView(아래) 로 읽기만 한다."""
+    readonly = False
+
+    def __init__(self, out_dir, db=None, round_id=None, label=None):
         self.out_dir = out_dir
         if not os.path.isdir(out_dir):
             os.makedirs(out_dir)
         self.md_path = os.path.join(out_dir, 'latest.md')
-        self.jsonl_path = os.path.join(out_dir, 'annotations.jsonl')
-        self.attach_dir = os.path.join(out_dir, 'attach')   # 사람이 붙인 그림(브8)
         self.lock = threading.RLock()
+        self.db = db or qadb.DB(os.path.join(out_dir, 'qa.sqlite'))
+        self.label = label or VER.label()
+        if round_id is None:
+            row = self.db.open_round(self.label)
+            round_id = row['id']
+        self.round_id = round_id
         self.pages = OrderedDict()      # url -> page dict
         # aid -> [attach_dir 안 파일 이름…]. 그림 본문은 jsonl 에 남기지 않는다
         # (base64 를 기록에 넣으면 파일이 순식간에 커진다) - 파일로만 둔다.
@@ -315,8 +322,10 @@ class Store(object):
         # aid -> {'note': str, 'refs': [aid…], 'expected': str, 'priority': ''|high|mid|low}
         self.meta = {}
         self.closing = u''              # 총평(추출·복사 때 사람이 적는 마지막 코멘트)
-        # 되돌리기: 무시할 이벤트 줄 번호(0-based). 과거 줄을 고치지 않는다.
-        self.skip = set()
+        # 화면 단위 캡처(1.2). key -> {'files': [...], 'partial': bool, 'reason': str,
+        #   'pins': {aid: label}, 'at': '시각', 'css_w', 'css_h', 'dpr'}
+        #   ★주석마다 찍지 않는다 - 화면(주소·해상도)당 1벌이다(CLAUDE.md 스크린샷 절).
+        self.captures = {}
         # 사람이 정한 주석 순서. key -> [aid…] (없으면 들어온 순서)
         self.order = {}
         # 하위 주석끼리의 순서. 부모 aid -> [자식 aid…] (없으면 연결한 순서)
@@ -325,12 +334,61 @@ class Store(object):
         self.child_order = {}
         self._replaying = False
         self._spots = None      # 지난 회차 자리 색인. 첫 렌더 때 한 번만 읽는다.
+        self._past_cache = {}   # round_id -> [(spot_url, path)] (닫힌 회차는 바뀌지 않는다)
         # 해상도를 알기 전('?') 키에서 실제 키로 옮겨 간 자취.
         #   ★응답 본문은 요청이 끝난 뒤 작업 큐를 거쳐 늦게 도착한다. 그 사이에
         #     merge_unknown 이 화면 키를 바꾸면, 늦게 온 기록이 은퇴한 키를 들고 와
         #     조용히 버려지고 '해상도 미상' 유령 화면까지 생긴다(실측: 400 본문이
         #     붙는 판과 안 붙는 판이 갈렸다 - 경합이었다).
         self.moved = {}
+
+    # ── 회차 ──────────────────────────────────────────────────
+    @property
+    def attach_dir(self):
+        """이 회차의 첨부 폴더. 회차마다 따로 둔다 - 비우기·추출 때 파일을 옮길 일이 없다."""
+        return os.path.join(self.out_dir, 'attach', 'r%d' % self.round_id)
+
+    @property
+    def capture_dir(self):
+        return os.path.join(self.out_dir, 'capture', 'r%d' % self.round_id)
+
+    def current_round(self):
+        return self.db.round(self.round_id)
+
+    def round_seq(self):
+        row = self.current_round()
+        return int(row['seq'] or 0) if row else 0
+
+    def round_title(self):
+        return _round_title(self.current_round())
+
+    def list_rounds(self):
+        """지난 회차 목록(닫힌 것만, 오래된 것부터)."""
+        with self.lock:
+            return [dict(r) for r in self.db.list_rounds('closed')]
+
+    def versions_of(self, aid):
+        """이 주석의 변경 이력(현재 회차). 보강 창 [변경 이력] 이 읽는다."""
+        with self.lock:
+            return self.db.versions_of(self.round_id, aid)
+
+    def _writing(self):
+        """★닫힌 회차에는 쓰지 않는다 - 조용히 무시하지 않고 예외를 던진다."""
+        if self.readonly and not self._replaying:
+            raise ReadOnlyRound(u'지난 회차(%s)는 읽기 전용입니다.' % self.round_title())
+
+    def _close_and_reopen(self, reason, export_path=''):
+        """현재 회차를 닫고 새 회차를 연다(비우기·추출). 파일은 옮기지 않는다 - 회차 폴더가 다르다."""
+        self._writing()
+        pages, total = self.counts()
+        self.db.close_round(self.round_id, reason=reason, export_path=export_path,
+                            n_pages=pages, n_anns=total)
+        old = self.round_id
+        row = self.db.open_round(self.label)
+        self.round_id = row['id']
+        self._past_cache.pop(old, None)
+        self._spots = None                      # 방금 닫힌 회차가 '지난 회차' 가 됐다
+        return old
 
     # ── 화면 ──────────────────────────────────────────────────
     @staticmethod
@@ -475,13 +533,14 @@ class Store(object):
         ★move_page 와 저장 경로를 하나로 둔다 - 따로 두면 한쪽만 고쳤을 때
           Ctrl+↑/↓ 와 드래그의 결과가 갈린다. 주어진 목록이 지금 화면 전체와
           정확히 같을 때만 반영한다(화면이 느는·주는 동안의 드래그를 막는다)."""
+        self._writing()
         with self.lock:
             keys = [tuple(k) for k in keys]
             if set(keys) != set(self.pages.keys()) or len(keys) != len(self.pages):
                 return None
             self.pages = OrderedDict((k, self.pages[k]) for k in keys)
             if not self._replaying:
-                self._append_jsonl({'t': 'porder',
+                self._append_event({'t': 'porder',
                                     'keys': [[k[0], k[1]] for k in keys]})
                 self.write_md()
             return keys
@@ -496,10 +555,11 @@ class Store(object):
 
     def set_order(self, key, ids):
         """화면 안 주석(최상위) 순서를 사람이 정한다(프4)."""
+        self._writing()
         with self.lock:
             self.order[key] = list(ids)
             if not self._replaying:
-                self._append_jsonl({'t': 'order', 'url': key[0], 'viewport': key[1],
+                self._append_event({'t': 'order', 'url': key[0], 'viewport': key[1],
                                     'ids': list(ids)})
                 self.write_md()
 
@@ -507,10 +567,11 @@ class Store(object):
         """한 상위 주석 밑, 하위 주석끼리의 순서를 사람이 정한다(브5·6).
 
         ★화면(key) 이 아니라 부모 aid 로 저장한다 - 하위는 다른 화면 것일 수 있다."""
+        self._writing()
         with self.lock:
             self.child_order[parent_aid] = list(ids)
             if not self._replaying:
-                self._append_jsonl({'t': 'corder', 'aid': parent_aid, 'ids': list(ids)})
+                self._append_event({'t': 'corder', 'aid': parent_aid, 'ids': list(ids)})
                 self.write_md()
 
     def _page(self, key):
@@ -590,7 +651,7 @@ class Store(object):
             # ★병합 사실을 기록에 남긴다. 안 남기면 재시작 복원(replay) 때
             #   '해상도 미상' 화면이 한 줄 더 살아나 라이브와 결과가 달라진다(실측).
             if not self._replaying:
-                self._append_jsonl({'t': 'merge', 'url': url, 'viewport': viewport})
+                self._append_event({'t': 'merge', 'url': url, 'viewport': viewport})
 
     def set_layout(self, payload):
         """레이아웃 모드(요소 이동·배치 상자)에서 옮긴 것을 화면에 붙인다(브3).
@@ -599,6 +660,7 @@ class Store(object):
           보낼 때마다 그 시점의 전체 diff 를 계산해 보내므로, 여기서 합치면 이미
           되돌린 변경까지 남는다. 손대지 않은 화면(layout 이 None) 은 애초에 오지
           않는다(inject.jsx 의 lastLayoutSig 초기값이 'null' 이라서)."""
+        self._writing()
         with self.lock:
             key = self.touch_page(payload)
             if key is None:
@@ -609,13 +671,14 @@ class Store(object):
                 return                      # 원래도 없었다 - 기록을 늘리지 않는다
             p['layout'] = lay
             if not self._replaying:
-                self._append_jsonl({'t': 'layout', 'url': key[0], 'viewport': key[1],
+                self._append_event({'t': 'layout', 'url': key[0], 'viewport': key[1],
                                     'layout': lay})
                 self.write_md()
 
     # ── 이벤트 적용 ────────────────────────────────────────────
     def apply(self, payload, persist=True):
         """주입 스크립트가 보낸 payload 하나를 반영한다. (화면 수, 주석 수) 반환."""
+        self._writing()
         with self.lock:
             key = self.touch_page(payload)
             if key is None:
@@ -655,7 +718,7 @@ class Store(object):
                     else:
                         p['annotations'][aid] = a
             if persist and not self._replaying:
-                self._append_jsonl({'t': 'annotation', 'payload': payload})
+                self._append_event({'t': 'annotation', 'payload': payload})
                 self.write_md()
             return self.counts()
 
@@ -665,7 +728,7 @@ class Store(object):
             p['console'].append({'ts': _now(), 'level': level, 'text': text})
             del p['console'][:-NOISE_CAP]
             if not self._replaying:
-                self._append_jsonl({'t': 'console', 'url': p['url'],
+                self._append_event({'t': 'console', 'url': p['url'],
                                     'viewport': p['viewport'], 'level': level, 'text': text})
 
     def add_network(self, key, request_url, status, reason='', token=''):
@@ -676,7 +739,7 @@ class Store(object):
                                  'token': token, 'body': ''})
             del p['network'][:-NOISE_CAP]
             if not self._replaying:
-                self._append_jsonl({'t': 'network', 'url': p['url'], 'viewport': p['viewport'],
+                self._append_event({'t': 'network', 'url': p['url'], 'viewport': p['viewport'],
                                     'request': request_url, 'status': status,
                                     'reason': reason, 'token': token})
 
@@ -700,7 +763,7 @@ class Store(object):
             else:
                 return
             if not self._replaying:
-                self._append_jsonl({'t': 'netbody', 'url': p['url'],
+                self._append_event({'t': 'netbody', 'url': p['url'],
                                     'viewport': p['viewport'], 'token': token, 'body': body})
 
     def _live_key(self, key):
@@ -730,34 +793,34 @@ class Store(object):
                                  'status': status, 'body': body, 'hits': 1})
                 del p['api'][:-API_CAP]
             if not self._replaying:
-                self._append_jsonl({'t': 'api', 'url': p['url'], 'viewport': p['viewport'],
+                self._append_event({'t': 'api', 'url': p['url'], 'viewport': p['viewport'],
                                     'request': request_url, 'status': status, 'body': body})
 
     def counts(self):
         pages = [p for p in self.pages.values() if p['annotations']]
         return len(pages), sum(len(p['annotations']) for p in pages)
 
-    def _archive_spots(self):
-        """지난 회차들이 어느 자리를 지적했는지. {(주소, 경로): [회차...]}
+    def _past_spots(self):
+        """지난 회차들이 어느 자리를 지적했는지. {(주소, 경로): [회차 표기...]}
 
         ★같은 자리가 회차를 넘겨 다시 올라오면 받는 쪽이 가장 먼저 알아야 하는 사실이다.
           '고쳤다더니 또 안 된다' 가 여기서 갈린다 - 지난 회차에 고쳤다고 회신한 자리가
           다시 지적되면 원인이 그때와 다르다는 뜻이므로, 회신 문안 자체가 달라져야 한다.
-        ★회차 파일은 export() 가 archive/ 에 남겨 둔 것이다. 한 번만 읽고 들고 있는다
-          (렌더는 주석마다 불린다 - 매번 디스크를 훑으면 안 된다)."""
+        ★닫힌 회차의 annotation_versions 에서 '마지막 버전' 만 본다(지운 것은 빠진다).
+          한 번만 읽고 들고 있는다(렌더는 주석마다 불린다). 회차가 닫힐 때 무효화한다."""
         if self._spots is not None:
             return self._spots
         spots = {}
-        arch = os.path.join(self.out_dir, 'archive')
-        try:
-            names = sorted(os.listdir(arch))
-        except Exception:
-            names = []
-        for name in names:
-            if not name.endswith('-annotations.jsonl'):
-                continue
-            label = _round_label(name)
-            for spot in _spots_of(os.path.join(arch, name)):
+        for row in self.db.list_rounds('closed'):
+            rid = row['id']
+            if rid == self.round_id:
+                continue                        # RoundView 자신은 '지난 회차' 가 아니다
+            label = _round_title(row)
+            got = self._past_cache.get(rid)
+            if got is None:
+                got = [(_spot_url(u), path) for u, path in self.db.latest_spots(rid)]
+                self._past_cache[rid] = got
+            for spot in got:
                 seen = spots.setdefault(spot, [])
                 if label not in seen:
                     seen.append(label)
@@ -790,12 +853,14 @@ class Store(object):
                         'priority': m.get('priority') or u'',
                         'files': len(self.attach.get(aid) or []),
                     })
+                cap = self.captures.get(self.key_of(p['url'], p['viewport'])) or {}
                 out.append({
                     'no': i, 'title': p['title'] or u'(제목 없음)',
                     'vp': p['viewport'], 'url': p['url'],
                     'ann': len(p['annotations']), 'con': len(p['console']),
                     'net': len(p['network']), 'anns': anns,
                     'layout': self._layout_rows(p),
+                    'cap': (cap.get('at') or u'')[11:16] if cap.get('files') else u'',
                 })
         return out
 
@@ -813,6 +878,9 @@ class Store(object):
                         'parent': node['parent'],
                         'title': (pages[i - 1]['title'] or u'(제목 없음)'),
                         'vp': pages[i - 1]['viewport'],
+                        'url': pages[i - 1]['url'],
+                        # ★하위(1.1)로 다른 화면 밑에 표시돼도 원 화면 키는 이것이다(잘라 붙이기가 쓴다)
+                        'home_url': node['key'][0], 'home_vp': node['key'][1],
                         'element': a.get('element') or u'?',
                         'comment': a.get('comment') or u'',
                     })
@@ -831,6 +899,7 @@ class Store(object):
         ★'기대' 와 '우선순위' 는 SC-295 인계 문서의 QA 요청 ③ 이다 - 받는 쪽이
           '지금 어떻고 어떻게 되어야 하나' 를 되묻지 않게 한다. 주석의 메모가 '현재',
           여기 적는 것이 '기대' 다."""
+        self._writing()
         refs = [r for r in (refs or []) if r and r != aid]
         seen, uniq = set(), []
         for r in refs:                              # 중복 제거(순서 유지)
@@ -846,16 +915,17 @@ class Store(object):
             else:
                 self.meta.pop(aid, None)
             if not self._replaying:
-                self._append_jsonl({'t': 'meta', 'aid': aid, 'note': note or u'',
+                self._append_event({'t': 'meta', 'aid': aid, 'note': note or u'',
                                     'refs': uniq, 'expected': expected or u'',
                                     'priority': priority})
                 self.write_md()
 
     def set_closing(self, text):
+        self._writing()
         with self.lock:
             self.closing = text or u''
             if not self._replaying:
-                self._append_jsonl({'t': 'closing', 'text': self.closing})
+                self._append_event({'t': 'closing', 'text': self.closing})
                 self.write_md()
 
     # ── 첨부 그림(브8) ────────────────────────────────────────
@@ -876,19 +946,34 @@ class Store(object):
             n += 1
 
     def _set_attach(self, aid, names):
+        self._writing()
         with self.lock:
             if names:
                 self.attach[aid] = list(names)
             else:
                 self.attach.pop(aid, None)
             if not self._replaying:
-                self._append_jsonl({'t': 'attach', 'aid': aid, 'files': list(names or [])})
+                self._append_event({'t': 'attach', 'aid': aid, 'files': list(names or [])})
                 self.write_md()
+
+    def add_image_bytes(self, aid, raw, ext='.png'):
+        """그림 바이트를 첨부로 저장한다(부분 캡처 - 사람이 영역을 골라 자른 것). 파일 이름."""
+        self._writing()
+        with self.lock:
+            self._ensure_attach_dir()
+            names = list(self.attach.get(aid) or [])
+            fname = self._next_attach_name(aid, names, ext)
+            with open(os.path.join(self.attach_dir, fname), 'wb') as f:
+                f.write(raw)
+            names.append(fname)
+            self._set_attach(aid, names)
+            return fname
 
     def add_images(self, aid, images):
         """메모창에 붙인 그림(브8). images = [{name?, mime?, data(base64 또는 data URL)}…]."""
         if not images:
             return []
+        self._writing()
         import base64
         added = []
         with self.lock:
@@ -919,12 +1004,12 @@ class Store(object):
         return added
 
     def add_attachment_file(self, aid, src_path):
-        """보강 창에서 사람이 파일을 골라 붙인다."""
-        import shutil
+        """보강 창에서 사람이 파일을 골라 붙인다(그림 또는 동영상 - Win+Alt+R 로 찍은 것)."""
+        self._writing()
         with self.lock:
             self._ensure_attach_dir()
             names = list(self.attach.get(aid) or [])
-            ext = os.path.splitext(src_path)[1] or '.png'
+            ext = (os.path.splitext(src_path)[1] or '.png').lower()
             fname = self._next_attach_name(aid, names, ext)
             shutil.copyfile(src_path, os.path.join(self.attach_dir, fname))
             names.append(fname)
@@ -932,6 +1017,7 @@ class Store(object):
             return fname
 
     def remove_attachment(self, aid, fname):
+        self._writing()
         with self.lock:
             names = list(self.attach.get(aid) or [])
             if fname not in names:
@@ -947,6 +1033,22 @@ class Store(object):
     def get_attachments(self, aid):
         with self.lock:
             return list(self.attach.get(aid) or [])
+
+    def attachment_rows(self, aid):
+        """보강 창 목록용. [{'name', 'kind', 'bytes', 'label'}] - 동영상은 크기를 같이 보인다."""
+        with self.lock:
+            out = []
+            for fn in (self.attach.get(aid) or []):
+                p = os.path.join(self.attach_dir, fn)
+                try:
+                    size = os.path.getsize(p)
+                except Exception:
+                    size = 0
+                kind = attach_kind(fn)
+                tag = {u'video': u'동영상', u'image': u'그림'}.get(kind, u'파일')
+                out.append({'name': fn, 'kind': kind, 'bytes': size,
+                            'label': u'%s  (%s · %s)' % (fn, tag, human_size(size))})
+            return out
 
     def has_attachments(self):
         with self.lock:
@@ -965,15 +1067,106 @@ class Store(object):
                     out.append((aid, os.path.join(self.attach_dir, fn)))
             return out
 
+    # ── 화면 단위 캡처(1.2) ─────────────────────────────────────
+    # ★주석마다 찍지 않는다. 화면(주소·해상도)당 1벌, 그 화면 항목 번호를 핀으로 겹친다.
+    #   찍는 것은 launcher(CDP), 여기는 대상 목록을 내주고 결과를 기록한다.
+    #   Store.lock 을 잡은 채 CDP 를 기다리지 않는다 - capture_targets() 로 스냅샷을 뽑아
+    #   잠금을 놓은 뒤 찍고, 결과만 set_capture() 로 잠금 안에서 저장한다.
+    def capture_targets(self):
+        """결과에 실리는 화면마다 {key, url, viewport, pins:{aid:{label, box, fixed, path}}}.
+
+        ★다른 화면 밑에 하위(1.1)로 표시되는 주석도 **자기 화면에** 그 label 로 그린다 -
+          문서 번호와 핀 번호가 1:1 이어야 한다."""
+        with self.lock:
+            pages = self._render_pages()
+            _roots, index, _loose = self._nested(pages)
+            out = []
+            for i, p in enumerate(pages, 1):
+                key = self.key_of(p['url'], p['viewport'])
+                pins = {}
+                for aid, a in p['annotations'].items():
+                    node = index.get(aid)
+                    if not node:
+                        continue
+                    pins[aid] = {'label': node['label'] if node['screen'] == i
+                                 else u'[%d] %s' % (node['screen'], node['label']),
+                                 'box': a.get('boundingBox') if isinstance(a.get('boundingBox'), dict) else None,
+                                 'fixed': bool(a.get('isFixed')),
+                                 'path': a.get('elementPath') or ''}
+                out.append({'key': key, 'screen': i, 'url': p['url'], 'viewport': p['viewport'],
+                            'pins': pins, 'title': p['title'] or u''})
+            return out
+
+    def set_capture(self, key, files, partial=False, reason=u'', pins=None, css_w=None,
+                    css_h=None, dpr=None):
+        """화면 하나의 캡처 결과를 기록한다(재캡처는 덮어쓴다 - 화면당 1벌)."""
+        self._writing()
+        key = tuple(key)
+        with self.lock:
+            rec = {'files': list(files or []), 'partial': bool(partial), 'reason': reason or u'',
+                   'pins': dict(pins or {}), 'at': _now(), 'css_w': css_w, 'css_h': css_h,
+                   'dpr': dpr}
+            self.captures[key] = rec
+            if not self._replaying:
+                self._append_event({'t': 'capture', 'url': key[0], 'viewport': key[1],
+                                    'files': rec['files'], 'partial': rec['partial'],
+                                    'reason': rec['reason'], 'pins': rec['pins'],
+                                    'at': rec['at'], 'css_w': css_w, 'css_h': css_h,
+                                    'dpr': dpr})
+                self.write_md()
+
+    def capture_of(self, key):
+        with self.lock:
+            return self.captures.get(tuple(key))
+
+    def has_captures(self):
+        with self.lock:
+            return any(c.get('files') for c in self.captures.values())
+
+    def all_capture_paths(self):
+        """(key, 절대경로) - 화면 순서대로. zip·Jira 가 담는 파일들."""
+        with self.lock:
+            out = []
+            for p in self._render_pages():
+                key = self.key_of(p['url'], p['viewport'])
+                for fn in (self.captures.get(key) or {}).get('files') or []:
+                    out.append((key, os.path.join(self.capture_dir, fn)))
+            return out
+
+    def _capture_lines(self, key, index):
+        """화면 블록의 '- 캡처:' 줄. 번호가 바뀐 뒤면 갱신이 필요하다고 적는다."""
+        c = self.captures.get(key)
+        if not c or not c.get('files'):
+            return []
+        stale = False
+        for aid, label in (c.get('pins') or {}).items():
+            node = index.get(aid)
+            now = (node['label'] if node else None)
+            if node and node['key'] != key:
+                now = u'[%d] %s' % (node['screen'], node['label'])
+            if now != label:
+                stale = True
+                break
+        tail = u''
+        if c.get('partial'):
+            tail += u' (아래쪽 잘림%s)' % ((u' · ' + c['reason']) if c.get('reason') else u'')
+        if stale:
+            tail += u' (번호 바뀜 · 캡처 갱신 필요)'
+        lines = []
+        for j, fn in enumerate(c['files']):
+            lines.append(u'- 캡처: 캡처/%s%s' % (fn, tail if j == len(c['files']) - 1 else u''))
+        return lines
+
     # ── 저장 ──────────────────────────────────────────────────
-    def _append_jsonl(self, rec):
-        try:
-            with io.open(self.jsonl_path, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + '\n')
-        except Exception:
-            pass
+    def _append_event(self, rec):
+        """이벤트를 현재 회차에 붙인다(옛 _append_jsonl). 실패는 조용히 넘기지 않는다 -
+        기록이 안 남으면 재시작 뒤 목록이 달라지는데, 그것이 가장 알아채기 어려운 고장이다."""
+        self._writing()
+        return self.db.add_event(self.round_id, rec)
 
     def write_md(self):
+        if self.readonly:
+            return                              # 지난 회차를 보는 중에 latest.md 를 덮지 않는다
         try:
             with io.open(self.md_path, 'w', encoding='utf-8') as f:
                 f.write(self.render())
@@ -1078,6 +1271,8 @@ class Store(object):
                           u'- 해상도: %s%s' % (p['viewport'] or u'미상',
                                             u' · DPR %s' % p['dpr'] if p['dpr'] else u''),
                           u'- 시각: %s ~ %s' % (p['first_seen'], p['last_seen'])]
+                # 화면 단위 캡처(1.2) - 있을 때만. 핀 번호는 아래 '## N.' 과 같다.
+                lines += self._capture_lines(self.key_of(p['url'], p['viewport']), index)
                 basis = _color_basis(p)
                 if basis:
                     # 색 지적을 받는 쪽이 어떤 테마의 값을 보고 있는지 알아야 한다.
@@ -1168,10 +1363,17 @@ class Store(object):
         for fn in (self.attach.get(aid) or []):
             # ★그림 본문은 여기 없다 - 파일 이름만 적는다(위 첨부 절 주석 참고).
             #   추출(zip) 때 이 이름 그대로 '첨부/' 안에 함께 담긴다.
-            lines.append(u'- 첨부: 첨부/%s' % fn)
+            if attach_kind(fn) == 'video':
+                try:
+                    size = human_size(os.path.getsize(os.path.join(self.attach_dir, fn)))
+                except Exception:
+                    size = u''
+                lines.append(u'- 첨부: 첨부/%s (동영상%s)' % (fn, u' ' + size if size else u''))
+            else:
+                lines.append(u'- 첨부: 첨부/%s' % fn)
         lines += [u'- 경로: `%s`' % (a.get('elementPath') or u''),
                   u'- 클래스: `%s`' % (a.get('cssClasses') or u'')]
-        again = self._archive_spots().get(
+        again = self._past_spots().get(
             (_spot_url(node['key'][0]), a.get('elementPath') or u''))
         if again:
             # ★회차를 넘겨 같은 자리가 또 올라왔다. 받는 쪽이 제일 먼저 볼 줄이다.
@@ -1252,184 +1454,163 @@ class Store(object):
         return lines
 
     # ── 복원 · 비우기 ──────────────────────────────────────────
+    def _apply_event(self, rec):
+        """이벤트 하나를 메모리에 반영한다(재생 전용 - persist 하지 않는다)."""
+        t = rec.get('t')
+        if t == 'annotation':
+            self.apply(rec.get('payload') or {}, persist=False)
+        elif t == 'console':
+            self.add_console(self.key_of(rec.get('url'), rec.get('viewport')),
+                             rec.get('text'), rec.get('level') or 'error')
+        elif t == 'network':
+            self.add_network(self.key_of(rec.get('url'), rec.get('viewport')),
+                             rec.get('request'), rec.get('status'),
+                             rec.get('reason') or '', rec.get('token') or '')
+        elif t == 'api':
+            self.add_api(self.key_of(rec.get('url'), rec.get('viewport')),
+                         rec.get('request'), rec.get('status'), rec.get('body') or '')
+        elif t == 'netbody':
+            self.set_network_body(self.key_of(rec.get('url'), rec.get('viewport')),
+                                  rec.get('token'), rec.get('body') or '')
+        elif t == 'merge':
+            self.merge_unknown(rec.get('url'), rec.get('viewport'))
+        elif t == 'meta':
+            self.set_meta(rec.get('aid'), rec.get('note') or u'',
+                          rec.get('refs') or [], rec.get('expected') or u'',
+                          rec.get('priority') or u'')
+        elif t == 'closing':
+            self.set_closing(rec.get('text') or u'')
+        elif t == 'order':
+            self.set_order(self.key_of(rec.get('url'), rec.get('viewport')),
+                           rec.get('ids') or [])
+        elif t == 'porder':
+            self.set_page_order(rec.get('keys') or [])
+        elif t == 'corder':
+            self.set_child_order(rec.get('aid'), rec.get('ids') or [])
+        elif t == 'layout':
+            self.set_layout({'url': rec.get('url'), 'viewport': rec.get('viewport'),
+                             'layout': rec.get('layout')})
+        elif t == 'attach':
+            self._set_attach(rec.get('aid'), rec.get('files') or [])
+        elif t == 'capture':
+            key = self.key_of(rec.get('url'), rec.get('viewport'))
+            self.set_capture(key, rec.get('files') or [], rec.get('partial'),
+                             rec.get('reason') or u'', rec.get('pins') or {},
+                             rec.get('css_w'), rec.get('css_h'), rec.get('dpr'))
+            if rec.get('at'):
+                self.captures[key]['at'] = rec['at']
+        # 모르는 t 는 무시한다 - 옛 기록(skip 등)과 앞으로의 확장 양쪽을 위해.
+
     def replay(self):
-        """프로그램을 다시 켰을 때 jsonl 을 재생해 목록을 되살린다."""
-        if not os.path.exists(self.jsonl_path):
-            return self.counts()
+        """프로그램을 다시 켰을 때 현재 회차의 이벤트를 재생해 목록을 되살린다.
+
+        ★되돌리기(skip)는 event id 로 DB 가 미리 걸러 준다 - 옛 jsonl 처럼 두 바퀴 돌 필요가 없다."""
         with self.lock:
             self._replaying = True
             try:
-                # ★두 번 읽는다. 첫 바퀴에서 'skip' 을 모아 두지 않으면 그보다 앞선
-                #   줄을 이미 반영한 뒤라 무시할 수 없다.
-                raw = self._read_events()
-                # ★'skip'(되돌리기)을 먼저 모은다. 한 바퀴로 하면 그보다 앞선 줄을
-                #   이미 반영한 뒤라 무시할 수 없다.
-                for rec in raw:
-                    if rec and rec.get('t') == 'skip':
-                        try:
-                            self.skip.add(int(rec.get('index')))
-                        except Exception:
-                            pass
-                for i, rec in enumerate(raw):
-                    if rec is None or i in self.skip:
-                        continue
-                    t = rec.get('t')
-                    if t == 'annotation':
-                        self.apply(rec.get('payload') or {}, persist=False)
-                    elif t == 'console':
-                        self.add_console(self.key_of(rec.get('url'), rec.get('viewport')),
-                                         rec.get('text'), rec.get('level') or 'error')
-                    elif t == 'network':
-                        self.add_network(self.key_of(rec.get('url'), rec.get('viewport')),
-                                         rec.get('request'), rec.get('status'),
-                                         rec.get('reason') or '', rec.get('token') or '')
-                    elif t == 'api':
-                        self.add_api(self.key_of(rec.get('url'), rec.get('viewport')),
-                                     rec.get('request'), rec.get('status'),
-                                     rec.get('body') or '')
-                    elif t == 'netbody':
-                        self.set_network_body(self.key_of(rec.get('url'), rec.get('viewport')),
-                                              rec.get('token'), rec.get('body') or '')
-                    elif t == 'merge':
-                        self.merge_unknown(rec.get('url'), rec.get('viewport'))
-                    elif t == 'meta':
-                        self.set_meta(rec.get('aid'), rec.get('note') or u'',
-                                      rec.get('refs') or [], rec.get('expected') or u'',
-                                      rec.get('priority') or u'')
-                    elif t == 'closing':
-                        self.set_closing(rec.get('text') or u'')
-                    elif t == 'order':
-                        self.set_order(self.key_of(rec.get('url'), rec.get('viewport')),
-                                       rec.get('ids') or [])
-                    elif t == 'porder':
-                        self.set_page_order(rec.get('keys') or [])
-                    elif t == 'corder':
-                        self.set_child_order(rec.get('aid'), rec.get('ids') or [])
-                    elif t == 'layout':
-                        self.set_layout({'url': rec.get('url'), 'viewport': rec.get('viewport'),
-                                         'layout': rec.get('layout')})
-                    elif t == 'attach':
-                        self._set_attach(rec.get('aid'), rec.get('files') or [])
-                    # 모르는 t 는 무시한다 - 옛 파일과 앞으로의 확장 양쪽을 위해.
+                for _eid, rec in self.db.events(self.round_id):
+                    if rec:
+                        self._apply_event(rec)
             finally:
                 self._replaying = False
             self.write_md()
             return self.counts()
 
     # ── 되돌리기 · 지난 기록 ──────────────────────────────────
-    def _read_events(self):
-        if not os.path.exists(self.jsonl_path):
-            return []
-        out = []
-        with io.open(self.jsonl_path, encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    out.append(None)
-                    continue
-                try:
-                    out.append(json.loads(line))
-                except Exception:
-                    out.append(None)
-        return out
-
     def undoable(self):
-        """되돌릴 수 있는 마지막 파괴적 이벤트를 찾는다. (줄번호, 설명) 또는 None."""
-        evs = self._read_events()
-        for i in range(len(evs) - 1, -1, -1):
-            if i in self.skip or not evs[i]:
-                continue
-            rec = evs[i]
-            if rec.get('t') != 'annotation':
+        """되돌릴 수 있는 마지막 파괴적 이벤트. (event_id, 설명) 또는 None."""
+        evs = self.db.events(self.round_id)         # skip 된 것은 이미 빠져 있다
+        for eid, rec in reversed(evs):
+            if not rec or rec.get('t') != 'annotation':
                 continue
             pay = rec.get('payload') or {}
             kind = pay.get('kind')
             if kind == 'clear':
-                return i, u'전체 지우기 (%s)' % (pay.get('url') or u'')
+                return eid, u'전체 지우기 (%s)' % (pay.get('url') or u'')
             if kind == 'delete':
                 n = len(pay.get('annotations') or [])
-                return i, u'주석 %d건 삭제 (%s)' % (n, pay.get('url') or u'')
+                return eid, u'주석 %d건 삭제 (%s)' % (n, pay.get('url') or u'')
         return None
 
     def undo(self):
         """마지막 지우기를 취소한다. 되살린 주석 수를 돌려준다.
 
-        ★과거 줄을 고치지 않는다. '이 줄은 무시' 를 덧붙이고 전체를 다시 재생한다 -
-          원본 기록이 증거이기 때문이다."""
+        ★과거 이벤트를 고치지 않는다. skip 에 그 event id 를 넣고 전체를 다시 재생한다 -
+          원본이 증거이기 때문이다. 줄 번호가 아니라 id 라서 회차를 가져와도 어긋나지 않는다."""
+        self._writing()
         hit = self.undoable()
         if not hit:
             return 0
-        idx, _desc = hit
+        eid, _desc = hit
         before = self.counts()[1]
         with self.lock:
-            self._append_jsonl({'t': 'skip', 'index': idx})
-            self.skip.add(idx)
+            self.db.add_skip(self.round_id, eid)
         self._reload()
         return self.counts()[1] - before
+
+    def _clear_memory(self):
+        self.pages.clear()
+        self.meta.clear()
+        self.order.clear()
+        self.child_order.clear()
+        self.moved.clear()
+        self.attach.clear()     # 파일은 그대로 - 'attach' 이벤트가 replay 로 되살린다
+        self.captures.clear()
+        self.closing = u''
 
     def _reload(self):
         """인메모리 상태를 기록에서 다시 만든다(skip 을 반영)."""
         with self.lock:
-            self.pages.clear()
-            self.meta.clear()
-            self.order.clear()
-            self.child_order.clear()
-            self.moved.clear()
-            self.attach.clear()     # 파일은 그대로 - 'attach' 이벤트가 replay 로 되살린다
-            self.closing = u''
-            keep = set(self.skip)
-            self.skip.clear()
+            self._clear_memory()
             self.replay()
-            self.skip |= keep
 
     def load_archive(self, path):
-        """지난 기록(archive 의 jsonl)을 현재 목록에 합친다(프5).
+        """옛 jsonl(1.1 의 archive 파일)을 **닫힌 회차로 가져온다**(프5, 1.2 에서 의미 변경).
 
-        ★현재 기록에 '합친다'. 따로 보관하면 진실이 두 곳이 되고, 그다음 추출에서
-          무엇이 들어갔는지 사람이 못 센다.
-        ★그 회차에 첨부 그림이 있었으면(브8) 옆의 '<stamp>-attach' 폴더에서 파일을
-          되돌린다(같은 이름으로 있으면 건드리지 않는다) - 안 그러면 'attach'
-          이벤트가 replay 될 때 파일 없는 첨부 줄만 되살아난다."""
-        added = 0
-        with io.open(path, encoding='utf-8') as f:
-            lines = [l.strip() for l in f if l.strip()]
+        ★현재 목록에 합치지 않는다. 1.1 까지는 현재 기록 뒤에 이어붙였는데, 그러면 총평·
+          순서·메타가 옛 값으로 덮이고 skip(줄 번호)이 어긋났다 - "이전 내역을 찾아가면
+          값이 변한다" 의 원인이었다. 가져온 회차는 지난 회차 창에서 읽기 전용으로 본다.
+        ★옆의 '<stamp>-attach' 폴더가 있으면 그 회차 첨부로 함께 복사한다.
+        돌려주는 값: (round_id, 넣은 이벤트 수)."""
+        base = os.path.basename(path)
+        when, stem = qadb._stamp_of(base)
+        adir = None
+        if stem:
+            cand = os.path.join(os.path.dirname(path), stem + '-attach')
+            if os.path.isdir(cand):
+                adir = cand
         with self.lock:
-            for line in lines:
-                try:
-                    json.loads(line)
-                except Exception:
-                    continue
-                with io.open(self.jsonl_path, 'a', encoding='utf-8') as out:
-                    out.write(line + '\n')
-                added += 1
-            base = os.path.basename(path)
-            if base.endswith('-annotations.jsonl'):
-                adir = os.path.join(os.path.dirname(path),
-                                    base[:-len('-annotations.jsonl')] + '-attach')
-                if os.path.isdir(adir):
-                    self._ensure_attach_dir()
-                    for fn in os.listdir(adir):
-                        dst = os.path.join(self.attach_dir, fn)
-                        if not os.path.exists(dst):
-                            try:
-                                import shutil
-                                shutil.copyfile(os.path.join(adir, fn), dst)
-                            except Exception:
-                                pass
-        self._reload()
-        return added, self.counts()
+            rid, n, _cp = qadb.import_jsonl(
+                self.db, path, self.label, status='closed', source='import',
+                attach_from=adir, attach_root=os.path.join(self.out_dir, 'attach'),
+                started_at=when, closed_at=when or _now(), reason=u'가져오기: %s' % base)
+            # 개수를 채워 두면 회차 창에서 재생 없이 보인다.
+            try:
+                view = RoundView(self.out_dir, self.db, rid)
+                pages, total = view.counts()
+                self.db.set_round_counts(rid, pages, total)
+            except Exception:
+                pass
+            self._spots = None
+        return rid, n
 
     def export(self, dest_path, text=None):
-        """현재 내용을 파일로 저장한 뒤 비운다. 저장이 실패하면 원본을 보존한다.
+        """현재 내용을 파일로 저장한 뒤 회차를 닫는다. 저장이 실패하면 회차를 닫지 않는다.
 
         text 를 주면 그것을 그대로 쓴다 - 사람이 '저장 전 확인' 창에서 고친 내용이다(프7).
-        주지 않으면 지금 상태로 렌더한다.
-        ★첨부 그림이 있으면(브8) dest_path 가 .zip 이어야 한다 - 문서(.md)와
-          그림(첨부/)을 한 파일로 묶어야 "폴더째 넘겨야 그림이 간다" 를 피할 수
-          있다. 그림이 없으면 지금처럼 .md 하나로 끝난다(고르는 것은 app.py)."""
+        ★첨부·캡처가 있으면 dest_path 가 .zip 이어야 한다 - 문서(.md)와 그림(첨부/·캡처/)을
+          한 파일로 묶어야 "폴더째 넘겨야 그림이 간다" 를 피할 수 있다(고르는 것은 app.py)."""
+        self._writing()
         with self.lock:
             if text is None:
                 text = self.render()
+            self.write_bundle(dest_path, text)
+            self.reset(keep_archive=True, reason=u'추출', export_path=dest_path)
+            return dest_path
+
+    def write_bundle(self, dest_path, text):
+        """문서(+첨부·캡처)를 파일로 쓴다. 회차는 건드리지 않는다(지난 회차 다시 보내기도 쓴다)."""
+        with self.lock:
             if dest_path.lower().endswith('.zip'):
                 import zipfile
                 md_name = os.path.splitext(os.path.basename(dest_path))[0] + '.md'
@@ -1439,61 +1620,36 @@ class Store(object):
                         for fn in names:
                             fpath = os.path.join(self.attach_dir, fn)
                             if os.path.exists(fpath):
-                                zf.write(fpath, '첨부/' + fn)
+                                zf.write(fpath, u'첨부/' + fn)
+                    for _key, fpath in self.all_capture_paths():
+                        if os.path.exists(fpath):
+                            zf.write(fpath, u'캡처/' + os.path.basename(fpath))
             else:
                 with io.open(dest_path, 'w', encoding='utf-8') as f:
                     f.write(text)
-            self.reset(keep_archive=True)
             return dest_path
 
-    def reset(self, keep_archive=True):
-        """목록을 비운다. keep_archive 면 jsonl·첨부 그림을 타임스탬프 이름으로
-        옮겨 남긴다(같은 stamp 를 써서 어느 회차 것인지 짝을 맞춘다)."""
+    def reset(self, keep_archive=True, reason=u'비우기', export_path=''):
+        """목록을 비운다 = 현재 회차를 닫고 새 회차를 연다. 기록·첨부·캡처는 닫힌 회차에 그대로
+        남는다(지난 회차 창에서 읽기 전용으로 본다). keep_archive 는 호환용 인자 - 1.2 부터는
+        어느 경우에도 지우지 않는다."""
+        self._writing()
         with self.lock:
-            stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-            arch = os.path.join(self.out_dir, 'archive')
-            if keep_archive and (os.path.exists(self.jsonl_path)
-                                  or (os.path.isdir(self.attach_dir)
-                                      and os.listdir(self.attach_dir))):
-                if not os.path.isdir(arch):
-                    os.makedirs(arch)
-                # ★같은 초에 두 번 비우면 앞의 회차를 덮어썼다. 번호를 붙여 남긴다.
-                seq = 1
-                dest = os.path.join(arch, '%s-annotations.jsonl' % stamp)
-                adest = os.path.join(arch, '%s-attach' % stamp)
-                while os.path.exists(dest) or os.path.exists(adest):
-                    seq += 1
-                    dest = os.path.join(arch, '%s_%03d-annotations.jsonl' % (stamp, seq))
-                    adest = os.path.join(arch, '%s_%03d-attach' % (stamp, seq))
-                if os.path.exists(self.jsonl_path):
-                    try:
-                        os.replace(self.jsonl_path, dest)
-                    except Exception:
-                        pass
-                if os.path.isdir(self.attach_dir) and os.listdir(self.attach_dir):
-                    try:
-                        os.replace(self.attach_dir, adest)
-                    except Exception:
-                        pass
-            else:
-                if os.path.exists(self.jsonl_path):
-                    try:
-                        os.remove(self.jsonl_path)
-                    except Exception:
-                        pass
-                if os.path.isdir(self.attach_dir):
-                    import shutil
-                    try:
-                        shutil.rmtree(self.attach_dir)
-                    except Exception:
-                        pass
-            self.pages.clear()
-            self.meta.clear()
-            self.order.clear()
-            self.child_order.clear()
-            self.moved.clear()
-            self.attach.clear()
-            self.skip.clear()
-            self.closing = u''
-            self._spots = None      # 방금 회차가 archive 로 들어갔다 - 다시 읽어야 한다
+            self._close_and_reopen(reason, export_path)
+            self._clear_memory()
             self.write_md()
+
+
+class RoundView(Store):
+    """지난(닫힌) 회차를 읽기 전용으로 되살린 Store. render/tree_rows/첨부·캡처 목록만 쓴다.
+
+    ★쓰기는 전부 예외(ReadOnlyRound). 무시하지 않는다 - 무시하면 화면과 기록이 어긋난 채
+      지나가서 "고쳤는데 다음에 또 원래대로" 가 된다. latest.md 도 덮지 않는다."""
+    readonly = True
+
+    def __init__(self, out_dir, db, round_id):
+        Store.__init__(self, out_dir, db=db, round_id=round_id)
+        self.replay()
+
+    def write_md(self):
+        return

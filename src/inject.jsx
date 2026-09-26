@@ -603,7 +603,8 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         try {
             if (!el || !el.closest) return false;
             return !!(el.closest('[data-agentation-root]') || el.closest('#' + TOP_ID) ||
-                      el.closest('#' + HOST_ID));
+                      el.closest('#' + HOST_ID) || el.closest('#' + SNIP_ID) ||
+                      el.closest('#' + PINS_ID));
         } catch (e) {
             return false;
         }
@@ -1413,6 +1414,395 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         return imgs.length ? imgs : null;
     }
 
+    /* ── 1.2: 우리 UI 를 잠시 숨긴다(캡처에 툴바·핀·메모창이 찍히지 않게) ──────
+     * visibility 로 숨긴다 - display:none 은 React 레이아웃·popover 상태를 건드린다. */
+    var hiddenUI = null;
+
+    function hideUI() {
+        if (hiddenUI) return;
+        hiddenUI = [];
+        try {
+            var els = [].slice.call(document.querySelectorAll(
+                '#' + HOST_ID + ', #' + TOP_ID + ', [data-agentation-root], #' + BADGE_ID +
+                ', #' + MODE_ID));
+            for (var i = 0; i < els.length; i++) {
+                var el = els[i];
+                hiddenUI.push([el, el.style.visibility, el.style.opacity]);
+                el.style.visibility = 'hidden';
+                el.style.opacity = '0';
+            }
+        } catch (e) { /* 무시 */ }
+    }
+
+    function showUI() {
+        if (!hiddenUI) return;
+        for (var i = 0; i < hiddenUI.length; i++) {
+            try {
+                hiddenUI[i][0].style.visibility = hiddenUI[i][1];
+                hiddenUI[i][0].style.opacity = hiddenUI[i][2];
+            } catch (e) { /* 무시 */ }
+        }
+        hiddenUI = null;
+    }
+
+    /* 이 문서가 최상위 문서 안에서 차지하는 자리(같은 출처 iframe 사슬을 따라 합산).
+     * 교차출처가 끼면 null - 그때는 프로그램이 CDP(DOM.getFrameOwner)로 구한다. */
+    function frameOffset() {
+        var x = 0, y = 0, w = window;
+        try {
+            while (w !== w.parent) {
+                var fe = w.frameElement;                 // 교차출처면 여기서 throw 또는 null
+                if (!fe) return null;
+                var r = fe.getBoundingClientRect();
+                x += r.left + (fe.clientLeft || 0);
+                y += r.top + (fe.clientTop || 0);
+                w = w.parent;
+            }
+        } catch (e) {
+            return null;
+        }
+        return { x: Math.round(x), y: Math.round(y) };
+    }
+
+    /* 주석이 가리키는 요소의 지금 자리(뷰포트 좌표). 경로가 유일할 때만 믿는다(pickFor 와 같다). */
+    function rectOfPath(path) {
+        try {
+            if (!path) return null;
+            var hit = document.querySelectorAll(path);
+            if (hit.length !== 1) return null;
+            var r = hit[0].getBoundingClientRect();
+            if (!r.width && !r.height) return null;
+            return { x: r.left, y: r.top, w: r.width, h: r.height };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /* ── 1.2: 화면 단위 캡처 훅 (window.__qaCapture) ─────────────────────
+     * ★주석마다 찍지 않는다. 화면(주소·해상도)당 1장을 프로그램이 [캡처 갱신] 때 찍고,
+     *   이 문서는 그 화면의 항목 번호를 핀으로 겹쳐 그려 줄 뿐이다. 찍는 것은 CDP(파이썬).
+     *   핀은 주석을 소유한 문서 자신에 그린다(좌표 변환 없음) - iframe 규칙과 같다. */
+    var PINS_ID = '__qa_pins';
+    var expanded = null;                 // iframe 높이를 늘렸을 때의 원래 값
+    var savedScroll = null;              // begin() 이 맨 위로 올리기 전의 스크롤 위치
+
+    function docSize() {
+        var de = document.documentElement, b = document.body || de;
+        return {
+            sw: Math.max(de.scrollWidth, b.scrollWidth, de.clientWidth),
+            sh: Math.max(de.scrollHeight, b.scrollHeight, de.clientHeight)
+        };
+    }
+
+    window.__qaCapture = {
+        where: function () {
+            var s = docSize();
+            return { url: location.href, vp: window.innerWidth + 'x' + window.innerHeight,
+                     top: window.top === window.self, dpr: window.devicePixelRatio || 1,
+                     sw: s.sw, sh: s.sh, sx: window.scrollX || 0, sy: window.scrollY || 0,
+                     offset: frameOffset() };
+        },
+        /* pins = {aid: {label, box:{x,y,width,height}|null, fixed, path}}
+         * ★실측(크롬 151, Page.captureScreenshot): clip 은 문서 좌표이고, captureBeyondViewport
+         *   전체 캡처에서도 position:fixed 요소는 '지금 스크롤 위치' 에 찍힌다. 그래서 찍기 전에
+         *   맨 위로 스크롤한다(고정 요소 = 문서 맨 위, 저장 좌표와 일치) - end() 가 되돌린다.
+         *   핀 컨테이너는 absolute(문서 원점) 다 - fixed 로 두면 스크롤만큼 밀린다. */
+        begin: function (pins) {
+            this.end();
+            hideUI();
+            savedScroll = { x: window.scrollX || 0, y: window.scrollY || 0 };
+            try { window.scrollTo(0, 0); } catch (e) { /* 무시 */ }
+            var wrap = document.createElement('div');
+            wrap.id = PINS_ID;
+            // popover(top layer)로 올려 페이지의 z-index 위에 그린다. 안 되면 속성을 떼고 보통 요소로.
+            wrap.style.cssText = 'position:absolute;left:0;top:0;inset:auto;margin:0;border:0;padding:0;' +
+                'width:0;height:0;max-width:none;max-height:none;background:none;overflow:visible;' +
+                'pointer-events:none;z-index:2147483647;';
+            var n = 0;
+            for (var aid in (pins || {})) {
+                if (!Object.prototype.hasOwnProperty.call(pins, aid)) continue;
+                var p = pins[aid] || {}, r = rectOfPath(p.path), x, y, w, h;
+                if (r) {                                     // 지금 자리 (스크롤 0 이라 문서 좌표)
+                    x = r.x; y = r.y; w = r.w; h = r.h;
+                } else if (p.box && typeof p.box.x === 'number') {
+                    // 저장 좌표: agentation 은 y 에 scrollY 를 더해 두고(fixed 는 뷰포트 y), x 는 뷰포트 기준.
+                    // 스크롤 0 기준이면 둘 다 그대로 문서 좌표다.
+                    x = p.box.x; y = p.box.y; w = p.box.width || 0; h = p.box.height || 0;
+                } else {
+                    continue;
+                }
+                var pin = document.createElement('div');
+                pin.style.cssText = 'position:absolute;left:' + Math.round(x) + 'px;top:' +
+                    Math.round(y) + 'px;width:' + Math.max(4, Math.round(w)) + 'px;height:' +
+                    Math.max(4, Math.round(h)) + 'px;border:2px solid #e1251b;' +
+                    'box-shadow:0 0 0 2px rgba(255,255,255,.85);box-sizing:border-box;';
+                var badge = document.createElement('div');
+                badge.textContent = String(p.label || '');
+                badge.style.cssText = 'position:absolute;left:-2px;top:-24px;min-width:22px;' +
+                    'padding:0 6px;height:22px;border-radius:11px;background:#e1251b;color:#fff;' +
+                    'font:700 13px/22px "Malgun Gothic",system-ui,sans-serif;text-align:center;' +
+                    'box-shadow:0 1px 4px rgba(0,0,0,.4);white-space:nowrap;';
+                if (y < 26) badge.style.top = '2px';
+                pin.appendChild(badge);
+                wrap.appendChild(pin);
+                n++;
+            }
+            (document.documentElement || document.body).appendChild(wrap);
+            promote(wrap);                                   // 실패하면 promote 가 속성을 뗀다
+            var s = docSize();
+            return { n: n, sw: s.sw, sh: s.sh, dpr: window.devicePixelRatio || 1,
+                     popover: !!(wrap.hasAttribute('popover')) };
+        },
+        end: function () {
+            var el = document.getElementById(PINS_ID);
+            if (el) {
+                try { el.hidePopover(); } catch (e) { /* 무시 */ }
+                if (el.parentNode) el.parentNode.removeChild(el);
+            }
+            if (savedScroll) {
+                try { window.scrollTo(savedScroll.x, savedScroll.y); } catch (e) { /* 무시 */ }
+                savedScroll = null;
+            }
+            showUI();
+            return true;
+        },
+        /* iframe 문서: 같은 출처 부모라면 이 프레임의 높이를 문서 전체로 늘린다(전체 캡처용). */
+        expand: function (h) {
+            try {
+                var fe = window.frameElement;
+                if (!fe) return false;
+                if (!expanded) {
+                    expanded = { el: fe, height: fe.style.height, maxHeight: fe.style.maxHeight,
+                                 minHeight: fe.style.minHeight };
+                }
+                fe.style.height = Math.ceil(h) + 'px';
+                fe.style.maxHeight = 'none';
+                fe.style.minHeight = '0';
+                return true;
+            } catch (e) {
+                return false;
+            }
+        },
+        restore: function () {
+            if (!expanded) return false;
+            try {
+                expanded.el.style.height = expanded.height;
+                expanded.el.style.maxHeight = expanded.maxHeight;
+                expanded.el.style.minHeight = expanded.minHeight;
+            } catch (e) { /* 무시 */ }
+            expanded = null;
+            return true;
+        }
+    };
+
+    /* ── 1.2: 영역 잘라 붙이기 (window.__qaSnip) ─────────────────────────
+     * "부분 스크린샷도 따로 붙일 수 있게" - 사람이 **영역을 골라** 자른다. 도구가 주석마다
+     * 스스로 찍는 것이 아니라 Win+Shift+S 를 대신하는 것이다(브8 '사람이 붙인 그림' 과 같은
+     * 자리에 저장). 이 문서는 좌표만 정하고, 찍는 것은 프로그램(CDP)이다.
+     *   시작: 메모창의 ✂ 버튼(target='popup' → 확정 전 그림 목록에 쌓임) 또는
+     *         보강 창 [화면에서 잘라 붙이기](target=aid → 프로그램이 곧장 첨부).
+     *   조작: 드래그로 영역 · Enter 로 제안 영역(그 주석의 요소) · Esc 로 취소.
+     * ★포인터 이벤트는 document 캡처 단계에서 가로챈다(guardClicks 보다 먼저 등록) -
+     *   오버레이 위 드래그가 agentation 의 요소 고르기나 페이지로 새지 않게. */
+    var SNIP_ID = '__qa_snip';
+    var snip = null;                     // {token, target, el, box, hint, suggest, sx, sy, active}
+    var snipCoolUntil = 0;               // 끝난 직후의 click 잔향을 삼킨다
+
+    function snipRect(a, b) {
+        var x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+        return { x: x, y: y, w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) };
+    }
+
+    function drawSnip(r) {
+        if (!snip || !snip.box) return;
+        var b = snip.box;
+        if (!r || r.w < 1 || r.h < 1) {
+            // 상자가 없을 땐 오버레이 자체를 어둡게, 있을 땐 상자 그림자로 바깥만 어둡게
+            b.style.display = 'none';
+            snip.el.style.background = 'rgba(0,0,0,.28)';
+            return;
+        }
+        snip.el.style.background = 'transparent';
+        b.style.display = 'block';
+        b.style.left = r.x + 'px';
+        b.style.top = r.y + 'px';
+        b.style.width = r.w + 'px';
+        b.style.height = r.h + 'px';
+        if (snip.size) snip.size.textContent = Math.round(r.w) + ' × ' + Math.round(r.h);
+    }
+
+    function startSnip(token, opts) {
+        opts = opts || {};
+        cancelSnip();
+        var el = document.createElement('div');
+        el.id = SNIP_ID;
+        el.style.cssText = 'position:fixed;inset:0;margin:0;border:0;padding:0;width:auto;height:auto;' +
+            'max-width:none;max-height:none;background:rgba(0,0,0,.28);cursor:crosshair;' +
+            'z-index:2147483647;user-select:none;-webkit-user-select:none;overflow:visible;';
+        var box = document.createElement('div');
+        box.style.cssText = 'position:absolute;display:none;border:2px solid #e1251b;' +
+            'background:rgba(255,255,255,.12);box-shadow:0 0 0 9999px rgba(0,0,0,.28);' +
+            'box-sizing:border-box;pointer-events:none;';
+        var size = document.createElement('div');
+        size.style.cssText = 'position:absolute;right:0;bottom:-22px;background:#e1251b;color:#fff;' +
+            'font:600 12px/18px "Malgun Gothic",system-ui,sans-serif;padding:0 6px;border-radius:4px;';
+        box.appendChild(size);
+        var hint = document.createElement('div');
+        hint.style.cssText = 'position:absolute;left:50%;top:16px;transform:translateX(-50%);' +
+            'background:rgba(17,17,17,.92);color:#fff;padding:8px 14px;border-radius:10px;' +
+            'font:600 13px/1.5 "Malgun Gothic",system-ui,sans-serif;white-space:nowrap;' +
+            'box-shadow:0 2px 10px rgba(0,0,0,.35);pointer-events:none;';
+        var suggest = null;
+        if (opts.suggest && opts.suggest.w > 0 && opts.suggest.h > 0) {
+            suggest = { x: Math.max(0, opts.suggest.x - 8), y: Math.max(0, opts.suggest.y - 8),
+                        w: Math.min(window.innerWidth, opts.suggest.w + 16),
+                        h: Math.min(window.innerHeight, opts.suggest.h + 16) };
+        } else if (opts.path) {
+            var r = rectOfPath(opts.path);
+            if (r) suggest = { x: Math.max(0, r.x - 8), y: Math.max(0, r.y - 8),
+                               w: Math.min(window.innerWidth, r.w + 16),
+                               h: Math.min(window.innerHeight, r.h + 16) };
+        }
+        hint.textContent = '드래그해서 잘라 붙일 영역을 고르세요' +
+            (suggest ? '  ·  Enter: 표시된 영역 그대로' : '') + '  ·  Esc: 취소';
+        el.appendChild(box);
+        el.appendChild(hint);
+        (document.documentElement || document.body).appendChild(el);
+        snip = { token: token, target: opts.target || 'popup', el: el, box: box, size: size,
+                 hint: hint, suggest: suggest, start: null, rect: null, active: true };
+        if (!promote(el)) el.style.zIndex = '2147483647';
+        drawSnip(suggest);                 // 제안 영역이 있으면 미리 그린다(Enter 로 확정)
+        return true;
+    }
+
+    function cancelSnip() {
+        if (!snip) return;
+        var el = snip.el;
+        try { el.hidePopover(); } catch (e) { /* 무시 */ }
+        if (el && el.parentNode) el.parentNode.removeChild(el);
+        snip = null;
+        snipCoolUntil = Date.now() + 400;
+        showUI();
+    }
+
+    function finishSnip(r) {
+        if (!snip || !r || r.w < 4 || r.h < 4) return;
+        var s = snip;
+        snip = null;
+        snipCoolUntil = Date.now() + 400;
+        try { s.el.hidePopover(); } catch (e) { /* 무시 */ }
+        if (s.el && s.el.parentNode) s.el.parentNode.removeChild(s.el);
+        hideUI();                                       // 찍히면 안 되는 것들을 숨기고
+        // 두 프레임 기다린 뒤 좌표를 보낸다(숨김이 화면에 반영될 시간).
+        requestAnimationFrame(function () {
+            requestAnimationFrame(function () {
+                push('snip', '', [], {
+                    token: s.token, target: s.target,
+                    rect: { x: Math.round(r.x), y: Math.round(r.y),
+                            w: Math.round(r.w), h: Math.round(r.h) },
+                    sx: window.scrollX || 0, sy: window.scrollY || 0,
+                    dpr: window.devicePixelRatio || 1,
+                    offset: frameOffset(), top: window.top === window.self
+                });
+                // 프로그램이 응답하지 않아도 UI 가 영영 숨어 있지 않게
+                setTimeout(function () { if (hiddenUI) showUI(); }, 8000);
+            });
+        });
+    }
+
+    function guardSnip() {
+        ['pointerdown', 'pointermove', 'pointerup', 'mousedown', 'mouseup', 'mousemove',
+         'click', 'dblclick', 'contextmenu', 'auxclick'].forEach(function (type) {
+            document.addEventListener(type, function (e) {
+                if (!snip) {
+                    if (Date.now() < snipCoolUntil && type !== 'mousemove' && type !== 'pointermove') {
+                        e.stopImmediatePropagation();
+                        e.preventDefault();
+                    }
+                    return;
+                }
+                e.stopImmediatePropagation();
+                e.preventDefault();
+                if (type === 'pointerdown' && (e.button === 0 || e.button === undefined)) {
+                    snip.start = { x: e.clientX, y: e.clientY };
+                    snip.rect = null;
+                    drawSnip(null);
+                } else if (type === 'pointermove' && snip.start) {
+                    snip.rect = snipRect(snip.start, { x: e.clientX, y: e.clientY });
+                    drawSnip(snip.rect);
+                } else if (type === 'pointerup' && snip.start) {
+                    var r = snipRect(snip.start, { x: e.clientX, y: e.clientY });
+                    snip.start = null;
+                    if (r.w >= 4 && r.h >= 4) finishSnip(r);
+                    else if (snip.suggest) drawSnip(snip.suggest);
+                } else if (type === 'contextmenu') {
+                    cancelSnip();
+                }
+            }, true);
+        });
+        document.addEventListener('keydown', function (e) {
+            if (!snip) return;
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            if (e.key === 'Escape') cancelSnip();
+            else if (e.key === 'Enter' && snip.suggest) finishSnip(snip.suggest);
+        }, true);
+    }
+
+    /* 프로그램(보강 창)이 부른다. opts = {target: aid, path, box:{x,y,width,height}, fixed} */
+    window.__qaSnip = function (token, opts) {
+        if (!isMine()) return false;
+        opts = opts || {};
+        if (!opts.suggest && !rectOfPath(opts.path) && opts.box && typeof opts.box.x === 'number') {
+            // 경로로 못 찾으면 저장 좌표를 쓴다: x 는 뷰포트 기준, y 는 문서 기준(fixed 면 뷰포트)
+            var sy = window.scrollY || 0;
+            opts.suggest = { x: opts.box.x, y: opts.box.y - (opts.fixed ? 0 : sy),
+                             w: opts.box.width || 0, h: opts.box.height || 0 };
+        }
+        return startSnip(token, opts);
+    };
+
+    /* 프로그램이 찍은 결과를 돌려준다. dataUrl 은 target 이 'popup' 일 때만 온다. */
+    window.__qaSnipDone = function (token, ok, dataUrl) {
+        showUI();
+        if (!ok || !dataUrl) return !!ok;
+        var pop = anyPopupNode();
+        if (!pop) return false;
+        var l2 = popupImages(pop).slice();
+        if (l2.length >= MAX_IMAGES) return false;
+        l2.push({ mime: 'image/png', data: String(dataUrl) });
+        setPopupImages(pop, l2);
+        renderAttachRow(pop);
+        return true;
+    };
+
+    /* 메모창 안의 ✂ 버튼. 한 노드에 한 번만 붙인다. */
+    var SNIP_BTN_ID = '__qa_snip_btn';
+
+    function ensureSnipButton() {
+        try {
+            var pop = anyPopupNode();
+            if (!pop || pop.querySelector('#' + SNIP_BTN_ID)) return;
+            var ta = pop.querySelector('textarea');
+            if (!ta) return;
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.id = SNIP_BTN_ID;
+            btn.textContent = '✂ 화면 잘라 붙이기';
+            btn.title = '화면에서 영역을 드래그해 이 메모에 그림으로 붙입니다 (Win+Shift+S 대신)';
+            btn.style.cssText = 'display:inline-block;margin:4px 0 2px;padding:2px 9px;border-radius:6px;' +
+                'border:1px solid rgba(255,255,255,.35);background:rgba(255,255,255,.08);color:inherit;' +
+                'font:600 11px/1.6 "Malgun Gothic",system-ui,sans-serif;cursor:pointer;';
+            btn.addEventListener('click', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                var token = 'p' + Date.now();
+                startSnip(token, { target: 'popup' });
+            });
+            if (ta.parentNode) ta.parentNode.insertBefore(btn, ta.nextSibling);
+        } catch (e) { /* 버튼 하나 때문에 도구가 서면 안 된다 */ }
+    }
+
     function start() {
         mount();
         lastUrl = location.href;
@@ -1420,10 +1810,12 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         watchFrames();
         every(reportMode, 250);         // 모드가 바뀌면 같은 탭의 다른 문서에도 맞춘다
         watchTop();
+        guardSnip();                    // ★guardClicks 보다 먼저 - 잘라 붙이기 드래그가 새지 않게
         guardEsc();
         guardClicks();
         watchPopup();
         watchAttach();                  // 브8: 메모창에 붙인 그림
+        every(ensureSnipButton, 400);   // 1.2: 메모창의 ✂ 버튼
         window.addEventListener('resize', onResize);
     }
 

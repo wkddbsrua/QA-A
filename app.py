@@ -17,14 +17,17 @@ import subprocess
 import sys
 import threading
 import traceback
+import webbrowser
 from datetime import datetime
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+import jira_api
 import launcher as L
+import qadb
 import version as VER
-from store import Store, PRIORITIES, PRIORITY_LABEL
+from store import Store, RoundView, ReadOnlyRound, PRIORITIES, PRIORITY_LABEL, attach_kind, human_size
 
 APP_NAME = '화면 주석 QA'
 RES = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
@@ -35,7 +38,22 @@ def pick_home():
 
     ★exe 옆에는 절대 쓰지 않는다 - USB·읽기전용 공유·다운로드 폴더에서 실행될 수 있다.
       %LOCALAPPDATA% 가 없거나(드문 구성) 로밍/네트워크로 리다이렉트돼 쓸 수 없는 PC 도
-      있으므로, 실제로 파일을 써 보고 되는 곳을 고른다. 첫 후보가 되면 거기서 끝난다."""
+      있으므로, 실제로 파일을 써 보고 되는 곳을 고른다. 첫 후보가 되면 거기서 끝난다.
+    ★QA_HOME 환경변수가 있으면 **그곳만** 쓴다(테스트 격리). 지정됐는데 쓸 수 없으면 폴백 없이
+      종료한다 - 조용히 실사용 폴더로 떨어지면 테스트 주석이 사용자 결과에 섞인다(실제 사고)."""
+    forced = os.environ.get('QA_HOME')
+    if forced:
+        try:
+            if not os.path.isdir(forced):
+                os.makedirs(forced)
+            probe = os.path.join(forced, '.write-test')
+            with open(probe, 'w', encoding='utf-8') as f:
+                f.write('ok')
+            os.remove(probe)
+            return forced
+        except Exception as e:
+            sys.stderr.write('QA_HOME 을 쓸 수 없습니다: %s (%s)\n' % (forced, e))
+            raise SystemExit(2)
     seen = []
     for base in (os.environ.get('LOCALAPPDATA'), os.environ.get('APPDATA'),
                  os.environ.get('TEMP'), os.path.expanduser('~')):
@@ -62,6 +80,8 @@ OUT_DIR = os.path.join(HOME, 'out')
 PROFILE_DIR = os.path.join(HOME, 'profile')
 SETTINGS = os.path.join(HOME, 'settings.json')
 SESSION = os.path.join(HOME, 'session.json')
+JIRA_CFG = os.path.join(HOME, 'jira.json')       # 1.2: 내 Jira 토큰(DPAPI 암호화)
+VIDEO_WARN = 100 * 1024 * 1024                  # 1.2: 동영상 첨부 경고 크기(계속 가능)
 INJECT_JS = os.path.join(RES, 'dist', 'inject.js')
 HELP_HTML = os.path.join(RES, 'docs', '사용법.html')
 
@@ -199,18 +219,30 @@ class App(tk.Tk):
         self.mono_font = pick_font(self, ['Consolas', 'D2Coding', 'Courier New'])
         self._fit_window(980, 660, 820, 520)
 
-        self.store = Store(OUT_DIR)
-        # 브4: 툴바를 최상위 화면에 고정할지(설정에 남는다)
-        self.force_top = tk.BooleanVar(value=False)
-        self.launcher = None
-        self._starting = False      # [QA 시작] 연타로 브라우저가 두 번 뜨지 않게
-        self.settings = self.load_settings()
-        self.force_top.set(bool(self.settings.get('toolbar_top')))
         # ★작업 스레드는 tkinter 를 직접 만지지 않는다.
         #   after() 조차 다른 스레드에서 부르면 "main thread is not in main loop" 로
         #   죽는다(실측 - 이 때문에 [QA 시작] 이 실패했다). 메시지만 큐에 넣고
         #   그리는 일은 메인 스레드의 _drain() 이 한다.
         self._msgq = queue.Queue()
+        self.settings = self.load_settings()
+        # 1.2: 회차 저장소(SQLite). 1.1 의 jsonl 이 있으면 첫 실행에 회차로 옮긴다.
+        #   ★실패하면 옮기지 않고(원본 그대로) 다음 실행에 다시 시도한다 - 빈 회차로 시작한다.
+        db = qadb.DB(os.path.join(OUT_DIR, 'qa.sqlite'))
+        self._migrated, self._migrate_error = None, None
+        try:
+            self._migrated = qadb.migrate_legacy(db, OUT_DIR, export_seq=self.settings.get('export_seq') or 0,
+                                                 label=VER.label(), log=self.log)
+        except Exception as e:
+            self._migrate_error = str(e)
+        self.store = Store(OUT_DIR, db=db)
+        self.jira = jira_api.JiraConfig(JIRA_CFG)
+        self._capturing = False     # 1.2: 캡처 갱신이 도는 중(겹치지 않게)
+        self._detail_windows = {}   # aid -> 보강 창 갱신 함수(잘라 붙이기 결과가 오면 목록을 새로 그린다)
+        # 브4: 툴바를 최상위 화면에 고정할지(설정에 남는다)
+        self.force_top = tk.BooleanVar(value=False)
+        self.launcher = None
+        self._starting = False      # [QA 시작] 연타로 브라우저가 두 번 뜨지 않게
+        self.force_top.set(bool(self.settings.get('toolbar_top')))
 
         # 기본값을 박아 두지 않는다 - 어떤 프로젝트에서든 그대로 쓰려면 빈 칸이어야 한다.
         self.target_url = tk.StringVar(value=self.settings.get('last_url', ''))
@@ -231,6 +263,17 @@ class App(tk.Tk):
                  % (VER.label(),
                     '둘 다 고르기(상단바·좌측 메뉴 + 본문)' if self.force_top.get() else '자동'))
         pages, total = self.store.replay()
+        if self._migrated:
+            self.log('1.1 기록을 회차로 옮겼습니다 - 회차 %d개 · 이벤트 %d건 · 첨부 %d개 (원본은 .migrated 로 남김)'
+                     % (self._migrated['rounds'], self._migrated['events'], self._migrated['attach']))
+        if self._migrate_error:
+            self.log('★1.1 기록을 옮기지 못했습니다: %s - 원본은 그대로 두었고 다음 실행에 다시 시도합니다.'
+                     % self._migrate_error)
+            messagebox.showwarning('지난 기록을 옮기지 못했습니다',
+                                   '1.1 의 기록(annotations.jsonl·archive)을 회차로 옮기다 실패했습니다.\n\n%s\n\n'
+                                   '원본은 그대로 두었습니다. 지금은 빈 회차로 시작하고, 다음 실행에 다시 시도합니다.'
+                                   % self._migrate_error)
+        self.log('현재 %s' % self.store.round_title())
         if total:
             self.log('지난 기록을 복원했습니다 - 화면 %d개 · 주석 %d건' % (pages, total))
         self.refresh()
@@ -314,6 +357,7 @@ class App(tk.Tk):
                               font=(self.ui_font, 9, 'bold'), padx=10, pady=3)
         self.badge.pack(side='right')
         ttk.Button(head, text='사용법', command=self.open_help).pack(side='right', padx=(0, 10))
+        ttk.Button(head, text='Jira 설정', command=self.open_jira_settings).pack(side='right', padx=(0, 8))
 
     def _bar(self):
         wrap = ttk.Frame(self, padding=(18, 6, 18, 8))
@@ -350,6 +394,8 @@ class App(tk.Tk):
         ttk.Button(bar, text='지난 기록', command=self.do_load_archive
                    ).pack(side='right', padx=(0, 8))
         ttk.Button(bar, text='되돌리기', command=self.do_undo).pack(side='right', padx=(0, 8))
+        # 1.2: 화면 단위 캡처(핀 오버레이). 주석마다가 아니라 화면당 1장 - 보내기 전에도 자동 1회.
+        ttk.Button(bar, text='캡처 갱신', command=self.do_capture).pack(side='right', padx=(0, 8))
         ttk.Button(bar, text='비우기 (보관)', command=self.do_reset).pack(side='right', padx=(0, 8))
         ttk.Button(bar, text='추출 (저장 후 삭제)', command=self.do_export).pack(side='right', padx=(0, 8))
         ttk.Button(bar, text='클립보드 복사', command=self.do_copy).pack(side='right', padx=(0, 8))
@@ -429,6 +475,22 @@ class App(tk.Tk):
                            'warn': messagebox.showwarning,
                            'info': messagebox.showinfo}.get(payload[0], messagebox.showinfo)
                     box(payload[1], payload[2])
+                elif kind == 'refresh':
+                    self._tree_sig = None
+                elif kind == 'snip':
+                    # 1.2: 잘라 붙이기 결과가 왔다 - 열려 있는 보강 창의 첨부 목록을 새로 그린다
+                    self._tree_sig = None
+                    fn = self._detail_windows.get(payload[0])
+                    if fn:
+                        try:
+                            fn()
+                        except Exception:
+                            pass
+                elif kind == 'call':
+                    try:
+                        payload()
+                    except Exception as e:
+                        self._write_log('오류: %s' % e)
         except queue.Empty:
             pass
         except Exception:
@@ -486,6 +548,7 @@ class App(tk.Tk):
         self.launcher.clear_stale = (self.store.counts()[1] == 0)
         self.launcher.force_top = bool(self.force_top.get())
         self.launcher.version = VER.label()
+        self.launcher.on_snip = lambda aid, fn: self._msgq.put(('snip', (aid, fn)))
         self._starting = True
 
         def run():
@@ -525,7 +588,7 @@ class App(tk.Tk):
 
     def refresh(self):
         pages, total = self.store.counts()
-        self.count_text.set('화면 %d개 · 주석 %d건' % (pages, total))
+        self.count_text.set('%d회차 · 화면 %d개 · 주석 %d건' % (self.store.round_seq(), pages, total))
         self._fill_tree()
         if self.launcher and not self.launcher.alive():
             self.set_status(False, '브라우저 닫힘')
@@ -549,8 +612,9 @@ class App(tk.Tk):
         #   내용이 그대로면 손대지 않는다.
         sig = repr([(r['no'], r['title'], r['vp'], r['url'], r['ann'], r['con'], r['net'],
                      [(a['aid'], a['no'], a['parent'], a['foreign'], a['comment'],
-                       a['note'], a['refs']) for a in r['anns']],
-                     r.get('layout')) for r in rows])
+                       a['note'], a['refs'], a['files'], a.get('priority'), a.get('expected'))
+                      for a in r['anns']],
+                     r.get('layout'), r.get('cap')) for r in rows])
         if sig == self._tree_sig:
             return
         self._tree_sig = sig
@@ -572,8 +636,10 @@ class App(tk.Tk):
             self.tree.delete(iid)
         for r in rows:
             pid = self._screen_iid(r)
+            # 1.2: 화면 캡처가 있으면 제목 뒤에 표시한다(시각) - 보내기 전에 어느 화면이 빠졌는지 보이게
+            ptitle = r['title'] + (' 📷%s' % r['cap'] if r.get('cap') else '')
             self.tree.insert('', 'end', iid=pid, open=(pid in opened),
-                             values=(r['no'], r['title'], r['vp'], r['url'],
+                             values=(r['no'], ptitle, r['vp'], r['url'],
                                      r['ann'], r['con'], r['net']))
             # ★anns 는 트리 전위 순서로 온다(store._flatten) - 부모가 자식보다
             #   먼저 나와서, 자식을 넣을 때 부모 iid 가 이미 있다.
@@ -591,6 +657,8 @@ class App(tk.Tk):
                     mark += ' ✎'                    # 보충 메모가 있다
                 if a['refs']:
                     mark += ' ⤷%d' % a['refs']      # 하위 주석이 있다
+                if a.get('files'):
+                    mark += ' 📎%d' % a['files']    # 첨부(그림·동영상)가 있다
                 memo = (a['comment'] or '(메모 없음)').replace('\n', ' ')
                 if len(memo) > 90:
                     memo = memo[:90] + '…'
@@ -875,26 +943,161 @@ class App(tk.Tk):
                             '브라우저 화면의 핀은 되살아나지 않습니다.' % n)
 
     def do_load_archive(self):
-        """프5: 추출·비우기 때 보관한 기록을 다시 불러온다."""
-        arch = os.path.join(OUT_DIR, 'archive')
-        path = filedialog.askopenfilename(
-            title='불러올 지난 기록을 고르세요',
-            initialdir=arch if os.path.isdir(arch) else OUT_DIR,
-            filetypes=[('주석 기록', '*.jsonl'), ('모든 파일', '*.*')])
+        """프5(1.2): 지난 회차 창. 1.1 까지는 옛 jsonl 을 현재 목록에 합쳤는데, 그러면 총평·순서·
+        메타가 옛 값으로 덮였다("이전 내역을 찾아가면 값이 변한다"). 이제 지난 회차는 **읽기 전용**
+        으로 따로 보고, 필요하면 그 회차 문서를 다시 복사·저장·Jira 로 보낸다."""
+        self.open_rounds_window()
+
+    def open_rounds_window(self):
+        f = self.ui_font
+        win = tk.Toplevel(self)
+        win.title('지난 회차 (읽기 전용)')
+        win.configure(bg='#ffffff')
+        win.transient(self)
+        win.geometry('860x460')
+        tk.Label(win, bg='#ffffff', font=(f, 11, 'bold'), anchor='w',
+                 text='지난 회차 — [비우기]·[추출] 때마다 한 회차가 닫힙니다').pack(fill='x', padx=16, pady=(14, 2))
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
+                 text='지난 회차는 고칠 수 없습니다(현재 목록에 합치지도 않습니다). [보기]로 문서를 읽고,\n'
+                      '[다시 보내기]로 그 회차 문서를 복사·저장·Jira 로 다시 보낼 수 있습니다. '
+                      '현재 회차: %s' % self.store.round_title()).pack(fill='x', padx=16)
+        cols = ('seq', 'start', 'end', 'reason', 'pages', 'anns', 'path')
+        tree = ttk.Treeview(win, columns=cols, show='headings', height=10)
+        for key, label, width, anchor in (
+                ('seq', '회차', 50, 'center'), ('start', '시작', 130, 'w'), ('end', '닫힘', 130, 'w'),
+                ('reason', '사유', 110, 'w'), ('pages', '화면', 50, 'center'),
+                ('anns', '주석', 50, 'center'), ('path', '추출 파일', 300, 'w')):
+            tree.heading(key, text=label)
+            tree.column(key, width=width, anchor=anchor)
+        tree.pack(fill='both', expand=True, padx=16, pady=(8, 0))
+        rows = {}
+
+        def fill():
+            for iid in tree.get_children(''):
+                tree.delete(iid)
+            rows.clear()
+            for r in self.store.list_rounds():
+                iid = 'r%d' % r['id']
+                rows[iid] = r
+                tree.insert('', 'end', iid=iid, values=(
+                    r['seq'], (r['started_at'] or '')[:16], (r['closed_at'] or '')[:16],
+                    r['closed_reason'] or '', '' if r['n_pages'] is None else r['n_pages'],
+                    '' if r['n_anns'] is None else r['n_anns'],
+                    os.path.basename(r['export_path'] or '') or ''))
+            if not rows:
+                tree.insert('', 'end', iid='none', values=('', '(아직 닫힌 회차가 없습니다)', '', '', '', '', ''))
+        fill()
+
+        def picked():
+            sel = tree.selection()
+            if not sel or sel[0] not in rows:
+                messagebox.showinfo('회차를 고르세요', '목록에서 회차를 먼저 고르세요.', parent=win)
+                return None
+            return rows[sel[0]]
+
+        def view_round():
+            r = picked()
+            if r:
+                self.open_round_view(r['id'])
+
+        def resend():
+            r = picked()
+            if r:
+                self.resend_round(r['id'])
+
+        def import_jsonl():
+            path = filedialog.askopenfilename(
+                title='가져올 옛 기록(jsonl)을 고르세요', parent=win,
+                initialdir=OUT_DIR,
+                filetypes=[('주석 기록(1.1 이하)', '*.jsonl'), ('모든 파일', '*.*')])
+            if not path:
+                return
+            try:
+                rid, n = self.store.load_archive(path)
+            except Exception as e:
+                messagebox.showerror('가져오기 실패', str(e), parent=win)
+                return
+            self.log('옛 기록을 지난 회차로 가져왔습니다 - %s (%d줄) → 회차 id %d'
+                     % (os.path.basename(path), n, rid))
+            fill()
+
+        bar = tk.Frame(win, bg='#ffffff')
+        bar.pack(fill='x', padx=16, pady=12)
+        ttk.Button(bar, text='닫기', command=win.destroy).pack(side='right')
+        ttk.Button(bar, text='옛 jsonl 가져오기', command=import_jsonl).pack(side='right', padx=(0, 8))
+        ttk.Button(bar, text='다시 보내기', command=resend).pack(side='right', padx=(0, 8))
+        ttk.Button(bar, text='보기', style='Go.TButton', command=view_round).pack(side='right', padx=(0, 8))
+        tree.bind('<Double-1>', lambda e: view_round())
+
+    def _round_view(self, rid):
+        try:
+            return RoundView(OUT_DIR, self.store.db, rid)
+        except Exception as e:
+            messagebox.showerror('회차를 읽지 못했습니다', str(e))
+            return None
+
+    def open_round_view(self, rid):
+        """닫힌 회차의 결과 문서를 읽기 전용으로 보여 준다."""
+        view = self._round_view(rid)
+        if view is None:
+            return
+        f = self.ui_font
+        win = tk.Toplevel(self)
+        win.title('지난 회차 보기 — %s (읽기 전용)' % view.round_title())
+        win.configure(bg='#ffffff')
+        win.geometry('900x700')
+        pages, total = view.counts()
+        tk.Label(win, bg='#ffffff', font=(f, 11, 'bold'), anchor='w',
+                 text='%s  ·  화면 %d개 · 주석 %d건 · 첨부 %d개' % (view.round_title(), pages, total,
+                                                            view.count_attachments())
+                 ).pack(fill='x', padx=16, pady=(14, 2))
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w',
+                 text='읽기 전용입니다. 고칠 수 없고 현재 목록에 합쳐지지도 않습니다.').pack(fill='x', padx=16)
+        wrap = tk.Frame(win, bg='#ffffff')
+        wrap.pack(fill='both', expand=True, padx=16, pady=(8, 0))
+        txt = tk.Text(wrap, font=(self.mono_font, 9), relief='solid', bd=1, wrap='none')
+        ysb = ttk.Scrollbar(wrap, orient='vertical', command=txt.yview)
+        txt.configure(yscrollcommand=ysb.set)
+        txt.insert('1.0', view.render())
+        txt.configure(state='disabled')
+        txt.pack(side='left', fill='both', expand=True)
+        ysb.pack(side='right', fill='y')
+        bar = tk.Frame(win, bg='#ffffff')
+        bar.pack(fill='x', padx=16, pady=12)
+        ttk.Button(bar, text='닫기', command=win.destroy).pack(side='right')
+        ttk.Button(bar, text='다시 보내기', command=lambda: self.resend_round(rid)).pack(side='right', padx=(0, 8))
+        if os.path.isdir(view.attach_dir):
+            ttk.Button(bar, text='첨부 폴더', command=lambda: self.open_path(view.attach_dir)
+                       ).pack(side='right', padx=(0, 8))
+        if os.path.isdir(view.capture_dir):
+            ttk.Button(bar, text='캡처 폴더', command=lambda: self.open_path(view.capture_dir)
+                       ).pack(side='right', padx=(0, 8))
+
+    def resend_round(self, rid):
+        """지난 회차 문서를 다시 보낸다(복사·저장·이슈·Jira). 회차는 건드리지 않는다."""
+        view = self._round_view(rid)
+        if view is None:
+            return
+        text = self.preview_text('지난 회차 다시 보내기 — %s' % view.round_title(), '저장', view=view)
+        if text is None:
+            return
+        has = view.has_attachments() or view.has_captures()
+        ext = '.zip' if has else '.md'
+        default = '화면주석_%s_%03d_재전송%s' % (datetime.now().strftime('%Y%m%d-%H%M'),
+                                              view.round_seq(), ext)
+        path = filedialog.asksaveasfilename(
+            title='어디에 저장할까요?', initialfile=default, defaultextension=ext,
+            filetypes=([('압축 파일(그림 포함)', '*.zip')] if has else [('마크다운', '*.md')])
+            + [('모든 파일', '*.*')])
         if not path:
             return
         try:
-            added, (pages, total) = self.store.load_archive(path)
+            view.write_bundle(path, text)
         except Exception as e:
-            messagebox.showerror('불러오기 실패', str(e))
+            messagebox.showerror('저장 실패', str(e))
             return
-        self._tree_sig = None
-        self._fill_tree()
-        self.log('지난 기록을 합쳤습니다 - %s (%d줄) → 화면 %d개 · 주석 %d건'
-                 % (os.path.basename(path), added, pages, total))
-        messagebox.showinfo('불러왔습니다',
-                            '%s\n\n현재 목록에 합쳤습니다.\n화면 %d개 · 주석 %d건'
-                            % (os.path.basename(path), pages, total))
+        self.log('지난 회차를 다시 저장했습니다 - %s' % path)
+        messagebox.showinfo('저장했습니다', path)
 
     def open_annotation(self, aid):
         """주석 하나에 보충 메모와 연결을 넣는다.
@@ -1045,41 +1248,76 @@ class App(tk.Tk):
         ttk.Button(side, text='하위 제거', command=del_ref).pack(fill='x', pady=(6, 0))
         redraw()
 
-        # ── 브8: 첨부 그림 ──
-        # ★도구가 스크린샷을 찍지 않는다(README) - 여기서는 사람이 이미 고른(또는
-        #   메모창에 붙인) 그림을 관리만 한다. 화면에서 붙인 것이 먼저 와 있다.
+        # ── 브8·1.2: 첨부 (그림 · 동영상 · 화면에서 잘라 붙인 것) ──
+        # ★도구가 주석마다 스스로 스크린샷을 찍지 않는다(README). 여기 오는 그림은 전부 사람이
+        #   고른 것이다: 메모창에 붙인 것, 파일로 고른 것, 클립보드, 그리고 1.2 의 '화면에서 잘라
+        #   붙이기'(사람이 영역을 드래그해 고른다 - Win+Shift+S 를 대신할 뿐이다).
         tk.Label(win, bg='#ffffff', font=(f, 10, 'bold'), anchor='w',
-                 text='첨부 그림').pack(fill='x', pady=(14, 2), **pad)
+                 text='첨부 (그림 · 동영상)').pack(fill='x', pady=(14, 2), **pad)
         tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
-                 text='화면의 메모창에 Ctrl+V(또는 끌어다 놓기)로 붙인 그림이 여기 쌓입니다.\n'
-                      '여기서 파일을 더 붙이거나 뺄 수도 있습니다. 클립보드 복사에는 그림이\n'
-                      '따라가지 않습니다 - 추출(파일 저장) 또는 이슈에 올리기로만 전달됩니다.'
+                 text='메모창에 Ctrl+V(또는 끌어다 놓기)로 붙인 그림이 여기 쌓입니다. [화면에서 잘라 붙이기]는\n'
+                      '브라우저에서 영역을 드래그해 이 주석에 붙입니다. 동영상은 Win+Alt+R 로 녹화한 파일을\n'
+                      '[파일 추가]로 붙이세요. 클립보드 복사에는 따라가지 않습니다 - 추출(zip)·이슈·Jira 로만 갑니다.'
                  ).pack(fill='x', **pad)
         abox = tk.Frame(win, bg='#ffffff')
         abox.pack(fill='x', pady=(2, 0), **pad)
-        alist = tk.Listbox(abox, font=(f, 10), height=3, relief='solid', bd=1,
+        alist = tk.Listbox(abox, font=(f, 10), height=4, relief='solid', bd=1,
                            activestyle='none', exportselection=False)
         alist.pack(side='left', fill='both', expand=True)
         aside = tk.Frame(abox, bg='#ffffff')
         aside.pack(side='right', fill='y', padx=(8, 0))
+        arows = []
 
         def redraw_attach():
             alist.delete(0, 'end')
-            for fn in self.store.get_attachments(aid):
-                alist.insert('end', fn)
+            del arows[:]
+            for r in self.store.attachment_rows(aid):
+                arows.append(r)
+                alist.insert('end', r['label'])
 
         def attach_file():
             path = filedialog.askopenfilename(
-                title='붙일 그림 고르기',
-                filetypes=[('그림', '*.png *.jpg *.jpeg *.gif *.webp'), ('모든 파일', '*.*')])
+                title='붙일 그림·동영상 고르기', parent=win,
+                filetypes=[('그림·동영상', '*.png *.jpg *.jpeg *.gif *.webp *.mp4 *.webm *.mov *.mkv'),
+                           ('그림', '*.png *.jpg *.jpeg *.gif *.webp'),
+                           ('동영상', '*.mp4 *.webm *.mov *.mkv'), ('모든 파일', '*.*')])
             if not path:
                 return
+            try:
+                size = os.path.getsize(path)
+            except Exception:
+                size = 0
+            if attach_kind(path) == 'video' and size > VIDEO_WARN:
+                # 1.2: 상한이 아니라 경고다 - 진짜 상한은 Jira 사이트의 uploadLimit(보낼 때 건너뛰고 나열).
+                if not messagebox.askyesno('큰 동영상',
+                                           '%s 입니다. zip 이 커지고 Jira 업로드가 거부될 수 있습니다.\n그래도 붙일까요?'
+                                           % human_size(size), parent=win):
+                    return
             try:
                 self.store.add_attachment_file(aid, path)
                 redraw_attach()
                 self._tree_sig = None
             except Exception as e:
                 messagebox.showerror('첨부 실패', str(e), parent=win)
+
+        def snip_from_screen():
+            """1.2: 브라우저 화면에서 영역을 드래그해 이 주석에 붙인다(그 주석의 화면이 열려 있어야 한다)."""
+            if not (self.launcher and self.launcher.alive() and self.launcher.cdp):
+                messagebox.showinfo('브라우저가 없습니다', '[QA 시작] 으로 브라우저를 먼저 열어 주세요.', parent=win)
+                return
+            key = self.store.key_of(info.get('home_url') or info.get('url') or '',
+                                    info.get('home_vp') or info.get('vp') or '')
+            ann = ((self.store.pages.get(key) or {}).get('annotations') or {}).get(aid) or {}
+            ok, why = self.launcher.request_snip(aid, key[0], key[1], ann.get('elementPath') or '',
+                                                 ann.get('boundingBox'), bool(ann.get('isFixed')))
+            if not ok:
+                if messagebox.askyesno('그 화면이 열려 있지 않습니다',
+                                       '%s\n\n브라우저를 그 화면으로 보낼까요? (열린 뒤 다시 누르세요)' % why,
+                                       parent=win):
+                    self.goto_url(key[0])
+                return
+            self.log('브라우저에서 영역을 드래그하세요 (Enter: 표시된 영역 · Esc: 취소) - [화면 %d] %s번'
+                     % (info['screen'], info['no']))
 
         def attach_clipboard():
             tmp = os.path.join(self.store.out_dir, '.clip-%s.png' % aid)
@@ -1100,23 +1338,56 @@ class App(tk.Tk):
 
         def open_attach():
             sel = alist.curselection()
-            if not sel:
+            if not sel or sel[0] >= len(arows):
                 return
-            self.open_path(os.path.join(self.store.attach_dir, alist.get(sel[0])))
+            self.open_path(os.path.join(self.store.attach_dir, arows[sel[0]]['name']))
 
         def remove_attach():
             sel = alist.curselection()
-            if not sel:
+            if not sel or sel[0] >= len(arows):
                 return
-            self.store.remove_attachment(aid, alist.get(sel[0]))
+            self.store.remove_attachment(aid, arows[sel[0]]['name'])
             redraw_attach()
             self._tree_sig = None
 
-        ttk.Button(aside, text='파일 추가', command=attach_file).pack(fill='x')
+        ttk.Button(aside, text='화면에서 잘라 붙이기', command=snip_from_screen).pack(fill='x')
+        ttk.Button(aside, text='파일 추가', command=attach_file).pack(fill='x', pady=(6, 0))
         ttk.Button(aside, text='클립보드에서 붙이기', command=attach_clipboard).pack(fill='x', pady=(6, 0))
         ttk.Button(aside, text='열기', command=open_attach).pack(fill='x', pady=(6, 0))
         ttk.Button(aside, text='빼기', command=remove_attach).pack(fill='x', pady=(6, 0))
         redraw_attach()
+        # 잘라 붙이기 결과는 나중에(브라우저에서 드래그가 끝난 뒤) 온다 - 창이 열려 있는 동안 갱신한다.
+        self._detail_windows[aid] = redraw_attach
+
+        def show_history():
+            """1.2: 이 주석의 변경 이력(덮어쓰지 않고 쌓아 둔 버전). 읽기 전용."""
+            vers = self.store.versions_of(aid)
+            hw = tk.Toplevel(win)
+            hw.title('변경 이력 — [화면 %d] %s번' % (info['screen'], info['no']))
+            hw.configure(bg='#ffffff')
+            hw.transient(win)
+            hw.geometry('640x360')
+            tk.Label(hw, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
+                     text='브라우저에서 메모를 고칠 때마다 한 줄씩 쌓입니다(이 회차 안). 되돌린 삭제는 "취소됨" 으로 남습니다.'
+                     ).pack(fill='x', padx=14, pady=(12, 4))
+            hl = tk.Text(hw, font=(f, 10), relief='solid', bd=1, wrap='word')
+            hl.pack(fill='both', expand=True, padx=14)
+            kinds = {'add': '추가', 'update': '수정', 'submit': '제출', 'copy': '복사', 'delete': '삭제',
+                     'clear': '전체 지우기'}
+            for v in vers:
+                hl.insert('end', '%d. %s  %s%s\n' % (v['seq'], v['at'], kinds.get(v['kind'], v['kind']),
+                                                    '  (취소됨)' if v.get('undone') else ''))
+                if v['comment']:
+                    hl.insert('end', '     %s\n' % v['comment'].replace('\n', ' '))
+            if not vers:
+                hl.insert('end', '(이력이 없습니다)')
+            hl.configure(state='disabled')
+            ttk.Button(hw, text='닫기', command=hw.destroy).pack(anchor='e', padx=14, pady=12)
+
+        def on_destroy(_e=None):
+            if self._detail_windows.get(aid) is redraw_attach:
+                self._detail_windows.pop(aid, None)
+        win.bind('<Destroy>', on_destroy)
 
         def save():
             self.store.set_meta(aid, note.get('1.0', 'end').strip(), refs,
@@ -1132,6 +1403,7 @@ class App(tk.Tk):
         bar.pack(fill='x', pady=14, **pad)
         ttk.Button(bar, text='취소', command=win.destroy).pack(side='right')
         ttk.Button(bar, text='저장', style='Go.TButton', command=save).pack(side='right', padx=(0, 8))
+        ttk.Button(bar, text='변경 이력', command=show_history).pack(side='left')
         note.focus_set()
 
     def ask_closing(self):
@@ -1175,26 +1447,61 @@ class App(tk.Tk):
         self.wait_window(win)
         return out['ok']
 
-    def preview_text(self, title, action_label):
+    def preview_text(self, title, action_label, view=None):
         """결과 문서를 보여 주고 고칠 기회를 준다(프7). 확정한 텍스트 또는 None.
 
-        총평을 먼저 묻고, 그 결과가 반영된 문서 전문을 띄운다."""
-        if not self.ask_closing():
+        view 를 주면 지난 회차(읽기 전용)다 - 총평을 묻지 않고, 캡처도 하지 않으며, 복사·저장·
+        이슈·Jira 는 전부 그 view 의 내용으로 한다(self.store 를 건드리지 않는다).
+        현재 회차면 총평을 먼저 묻고, 브라우저가 떠 있으면 **열려 있는 화면을 한 번 캡처**한 뒤
+        (마지막 화면을 안 찍고 보내는 일이 없게) 그 결과가 반영된 문서 전문을 띄운다."""
+        store = view or self.store
+        live = view is None
+        if live and not self.ask_closing():
             return None
-        text = self.store.render()
+        if live and self.launcher and self.launcher.alive() and self.launcher.cdp and not self._capturing:
+            self._capturing = True
+            self.configure(cursor='watch')
+            self.update_idletasks()
+            try:
+                self._capture_all()
+            except Exception as e:
+                self.log('자동 캡처 실패(계속 진행): %s' % e)
+            finally:
+                self._capturing = False
+                self.configure(cursor='')
+        text = store.render()
         f = self.ui_font
         win = tk.Toplevel(self)
         win.title(title)
         win.configure(bg='#ffffff')
         win.transient(self)
         win.grab_set()
-        win.geometry('900x720')
+        win.geometry('940x760')
 
         tk.Label(win, bg='#ffffff', font=(f, 11, 'bold'), anchor='w',
-                 text='보내기 전에 확인하세요').pack(fill='x', padx=16, pady=(16, 2))
+                 text='보내기 전에 확인하세요' if live else '지난 회차 문서 (읽기 전용 회차)'
+                 ).pack(fill='x', padx=16, pady=(16, 2))
         tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
-                 text='여기서 고친 내용은 이번 %s 에만 반영됩니다 — 목록은 그대로 남습니다.'
-                      % action_label).pack(fill='x', padx=16)
+                 text=('여기서 고친 내용은 이번 %s 에만 반영됩니다 — 목록은 그대로 남습니다.' % action_label)
+                 if live else '여기서 고친 내용은 이번 보내기에만 반영됩니다 — 회차 기록은 바뀌지 않습니다.'
+                 ).pack(fill='x', padx=16)
+
+        # 1.2: 화면별 캡처 유무. 없는 화면은 [이동] 으로 열고 [캡처 갱신] 을 누르면 된다.
+        caps = tk.Frame(win, bg='#ffffff')
+        caps.pack(fill='x', padx=16, pady=(6, 0))
+        cap_rows = []
+        for t in store.capture_targets():
+            c = store.capture_of(t['key'])
+            if c and c.get('files'):
+                cap_rows.append('화면 %d 캡처 %s' % (t['screen'], (c.get('at') or '')[11:16]))
+            else:
+                cap_rows.append('화면 %d 캡처 없음' % t['screen'])
+        if cap_rows:
+            tk.Label(caps, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
+                     wraplength=880,
+                     text='화면 캡처: ' + ' · '.join(cap_rows)
+                          + ('   (없는 화면은 목록의 주소를 눌러 열고 [캡처 갱신])' if live else '')
+                     ).pack(side='left')
 
         wrap = tk.Frame(win, bg='#ffffff')
         wrap.pack(fill='both', expand=True, padx=16, pady=(8, 0))
@@ -1222,17 +1529,28 @@ class App(tk.Tk):
             out['text'] = txt.get('1.0', 'end-1c')
             win.destroy()
 
-        # 브8: 첨부 그림이 있으면 이슈에 올릴 때 함께 보낼지 고를 수 있다.
-        n_img = self.store.count_attachments()
-        with_images = tk.BooleanVar(value=True)
+        def copy_now():
+            body = txt.get('1.0', 'end-1c')
+            if set_clipboard(body):
+                self.log('클립보드로 복사했습니다 (창을 닫아도 유지됩니다).')
+                messagebox.showinfo('복사했습니다', '문서를 클립보드에 담았습니다.', parent=win)
+            else:
+                messagebox.showerror('복사 실패', '클립보드에 쓰지 못했습니다.', parent=win)
+
+        # 브8·1.2: 첨부 그림·동영상·화면 캡처를 이슈에 함께 올릴지
+        n_att = store.count_attachments()
+        n_cap = len(store.all_capture_paths())
+        with_files = tk.BooleanVar(value=True)
+
+        def files_to_send():
+            if not with_files.get():
+                return []
+            return ([p for _aid, p in store.all_attachment_paths()]
+                    + [p for _k, p in store.all_capture_paths()])
 
         def to_issue():
-            """이슈 화면을 열고 댓글칸을 채운다. ★등록은 사람이 누른다.
-
-            API 토큰을 쓰지 않는다 - 이 브라우저에 사람이 이미 로그인해 두었으므로
-            그 세션을 그대로 쓴다. 토큰 보관 문제가 없고 오발송도 없다.
-            못 채워도 실패가 아니다: 클립보드에 담아 두고 붙여넣도록 안내한다
-            (지라 댓글 편집기는 리치 텍스트라 화면마다 다르다 - 자동 채움을 보장하지 않는다)."""
+            """브라우저 세션으로 이슈 화면을 열고 댓글칸을 채운다. ★등록은 사람이 누른다(토큰 없는 사람용).
+            못 채워도 실패가 아니다: 클립보드에 담아 두고 붙여넣도록 안내한다."""
             body = txt.get('1.0', 'end-1c')
             url = simpledialog.askstring(
                 '이슈 주소',
@@ -1250,17 +1568,16 @@ class App(tk.Tk):
                     '내용을 클립보드에 담았습니다.\n'
                     '[QA 시작] 으로 브라우저를 열고 이슈 화면에서 붙여넣으세요.', parent=win)
                 return
-            files = ([p for _aid, p in self.store.all_attachment_paths()]
-                     if (n_img and with_images.get()) else None)
+            files = files_to_send() or None
             res = self.launcher.paste_into(url, body, files=files)
             if res.get('filled'):
                 img_msg = ''
                 if files:
-                    img_msg = ('\n\n그림 %d장을 댓글에 넣었습니다.' % len(files)
+                    img_msg = ('\n\n파일 %d개를 댓글에 넣었습니다.' % len(files)
                                if res.get('images') else
-                               '\n\n그림은 자동으로 못 넣었습니다 - 첨부 폴더에서 직접 올려 주세요.')
+                               '\n\n파일은 자동으로 못 넣었습니다 - 첨부 폴더에서 직접 올려 주세요.')
                     if not res.get('images'):
-                        self.open_path(self.store.attach_dir)
+                        self.open_path(store.attach_dir if os.path.isdir(store.attach_dir) else store.out_dir)
                 self.log('이슈 화면을 열고 댓글칸을 채웠습니다 - 확인한 뒤 [등록] 을 누르세요.')
                 messagebox.showinfo(
                     '채워 넣었습니다',
@@ -1279,17 +1596,28 @@ class App(tk.Tk):
                     '이슈 화면을 열지 못했습니다.\n'
                     '내용은 클립보드에 담아 두었으니 직접 붙여넣어 주세요.', parent=win)
 
+        def to_jira():
+            self.send_to_jira(txt.get('1.0', 'end-1c'), files_to_send(), parent=win)
+
         bar = tk.Frame(win, bg='#ffffff')
         bar.pack(fill='x', padx=16, pady=12)
         ttk.Label(bar, textvariable=info).pack(side='left')
         ttk.Button(bar, text='취소', command=win.destroy).pack(side='right')
         ttk.Button(bar, text=action_label, style='Go.TButton',
                    command=confirm).pack(side='right', padx=(0, 8))
+        if action_label != '복사':
+            ttk.Button(bar, text='클립보드 복사', command=copy_now).pack(side='right', padx=(0, 8))
+        ttk.Button(bar, text='Jira 로 보내기 (토큰)', command=to_jira).pack(side='right', padx=(0, 8))
         ttk.Button(bar, text='이슈에 올리기 (등록은 직접)',
                    command=to_issue).pack(side='right', padx=(0, 8))
-        if n_img:
-            tk.Checkbutton(bar, variable=with_images, bg='#ffffff', font=(f, 9),
-                           text='그림 %d장도 함께 올리기' % n_img).pack(side='right', padx=(0, 8))
+        if n_att or n_cap:
+            bits = []
+            if n_att:
+                bits.append('첨부 %d개' % n_att)
+            if n_cap:
+                bits.append('캡처 %d장' % n_cap)
+            tk.Checkbutton(bar, variable=with_files, bg='#ffffff', font=(f, 9),
+                           text='%s도 함께 올리기' % ' · '.join(bits)).pack(side='right', padx=(0, 8))
         txt.focus_set()
         self.wait_window(win)
         return out['text']
@@ -1320,14 +1648,13 @@ class App(tk.Tk):
                             '메일·메신저·이슈에 그대로 붙여넣으세요.' % (pages, total))
 
     def next_export_name(self, ext='.md'):
-        """추출 파일 이름 - 날짜·시각에 회차를 붙인다.
+        """추출 파일 이름 - 날짜·시각에 회차 번호를 붙인다.
 
         ★같은 이름으로 덮어쓰면 "어느 것이 최신인가" 를 파일 이름만으로 가릴 수 없다.
-          회차는 설정에 남겨 계속 올라간다(같은 분에 두 번 뽑아도 겹치지 않는다).
-          도구 판 번호는 파일 이름이 아니라 문서 머리에 적는다 - 받는 사람이 읽을
-          자리는 문서 안이고, 이름에 번호가 둘이면 그게 더 헷갈린다."""
-        seq = int(self.settings.get('export_seq') or 0) + 1
-        return '화면주석_%s_%03d%s' % (datetime.now().strftime('%Y%m%d-%H%M'), seq, ext)
+          회차 번호는 1.2 부터 DB 의 rounds.seq 다(1.1 의 settings.export_seq 를 승계했다).
+          도구 판 번호는 파일 이름이 아니라 문서 머리에 적는다."""
+        return '화면주석_%s_%03d%s' % (datetime.now().strftime('%Y%m%d-%H%M'),
+                                     self.store.round_seq(), ext)
 
     def do_export(self):
         pages, total = self.store.counts()
@@ -1337,9 +1664,9 @@ class App(tk.Tk):
         text = self.preview_text('저장 전 확인', '저장')
         if text is None:
             return
-        # 브8: 첨부 그림이 있으면 파일 하나(zip)로 묶는다 - 문서와 그림이 따로면
-        #   폴더째 넘기지 않는 한 그림이 빠진다.
-        has_img = self.store.has_attachments()
+        # 브8·1.2: 첨부 그림·동영상·화면 캡처가 있으면 파일 하나(zip)로 묶는다 - 문서와 그림이
+        #   따로면 폴더째 넘기지 않는 한 그림이 빠진다.
+        has_img = self.store.has_attachments() or self.store.has_captures()
         ext = '.zip' if has_img else '.md'
         filetypes = ([('압축 파일(그림 포함)', '*.zip'), ('모든 파일', '*.*')] if has_img
                      else [('마크다운', '*.md'), ('모든 파일', '*.*')])
@@ -1349,20 +1676,18 @@ class App(tk.Tk):
             defaultextension=ext, filetypes=filetypes)
         if not path:
             return
+        seq = self.store.round_seq()
         try:
-            self.store.export(path, text=text)      # 확인·수정한 그 내용을 저장한다
+            self.store.export(path, text=text)      # 확인·수정한 그 내용을 저장하고 회차를 닫는다
         except Exception as e:
             # 저장이 실패하면 목록을 지우지 않는다(잃는 것보다 중복이 낫다).
             messagebox.showerror('저장 실패', '%s\n\n목록은 그대로 두었습니다.' % e)
             return
-        # 성공했을 때만 회차를 올린다(실패한 저장은 번호를 먹지 않는다).
-        self.settings['export_seq'] = int(self.settings.get('export_seq') or 0) + 1
-        self.save_settings()
         self._tree_sig = None
         n = self.clear_browser_side()
-        self.log('추출 완료 - %s (화면 %d개 · 주석 %d건%s). 목록을 비웠습니다%s.'
-                 % (path, pages, total, ' · 그림 포함(zip)' if has_img else '',
-                    ' · 브라우저 이력 %d건도 비움' % n if n else ''))
+        self.log('추출 완료 - %s (%d회차 · 화면 %d개 · 주석 %d건%s). 회차를 닫고 %d회차를 열었습니다%s.'
+                 % (path, seq, pages, total, ' · 그림 포함(zip)' if has_img else '',
+                    self.store.round_seq(), ' · 브라우저 이력 %d건도 비움' % n if n else ''))
         messagebox.showinfo('저장했습니다', path)
 
     def do_reset(self):
@@ -1370,7 +1695,7 @@ class App(tk.Tk):
         if not total:
             # ★목록이 비어 있어도 브라우저 쪽은 남아 있을 수 있다(agentation 자체 저장, 7일).
             #   여기서 그냥 나가 버려서 "목록엔 없는데 브라우저엔 마커가 남는" 상태가 됐다.
-            self.store.reset()
+            #   회차는 닫지 않는다(빈 회차를 늘리지 않는다).
             n = self.clear_browser_side()
             self.log('목록은 이미 비어 있었습니다%s.'
                      % (' · 브라우저 이력 %d건 비움' % n if n else
@@ -1378,14 +1703,15 @@ class App(tk.Tk):
             return
         if not messagebox.askyesno('비우기',
                                    '화면 %d개 · 주석 %d건을 목록에서 비웁니다.\n'
-                                   '원본 기록은 결과 폴더의 archive 에 남습니다.\n\n계속할까요?'
+                                   '이 회차는 닫히고 [지난 기록] 에서 읽기 전용으로 볼 수 있습니다.\n\n계속할까요?'
                                    % (pages, total)):
             return
+        seq = self.store.round_seq()
         self.store.reset()
         self._tree_sig = None
         n = self.clear_browser_side()
-        self.log('목록을 비웠습니다(원본은 archive 에 보관)%s.'
-                 % (' · 브라우저 이력 %d건도 비움' % n if n else ''))
+        self.log('%d회차를 닫고 %d회차를 열었습니다(지난 기록에서 볼 수 있습니다)%s.'
+                 % (seq, self.store.round_seq(), ' · 브라우저 이력 %d건도 비움' % n if n else ''))
 
     def clear_browser_side(self):
         """브라우저(localStorage)에 남은 주석 이력도 함께 비운다.
@@ -1398,6 +1724,314 @@ class App(tk.Tk):
             return self.launcher.clear_browser_annotations()
         except Exception:
             return 0
+
+    def do_capture(self):
+        """1.2: 지금 열려 있는 화면들을 화면 단위로 찍는다(핀 오버레이). 버튼 「캡처 갱신」.
+
+        ★주석마다 찍지 않는다 - 화면(주소·해상도)당 1벌. 열려 있지 않은 화면은 건너뛰고 그 사실을
+          로그에 적는다(보내기 전 확인 창이 화면별 캡처 유무를 보여 준다)."""
+        if not (self.launcher and self.launcher.alive() and self.launcher.cdp):
+            messagebox.showinfo('브라우저가 없습니다', '[QA 시작] 으로 브라우저를 먼저 열어 주세요.')
+            return
+        if self._capturing:
+            self.log('이미 캡처 중입니다.')
+            return
+        self._capturing = True
+        self.log('캡처 갱신 - 열려 있는 화면을 찾는 중…')
+
+        def run():
+            try:
+                self._capture_all()
+            finally:
+                self._capturing = False
+        threading.Thread(target=run, daemon=True).start()
+
+    def _capture_all(self):
+        """열려 있는 화면 전부 캡처(작업 스레드). {'done': [...], 'skipped': [(screen, reason)]}"""
+        out = {'done': [], 'skipped': []}
+        if not (self.launcher and self.launcher.alive() and self.launcher.cdp):
+            return out
+        targets = self.store.capture_targets()      # 잠금 안에서 스냅샷만 뽑고
+        for t in targets:                           # 잠금 밖에서 CDP 를 기다린다
+            try:
+                r = self.launcher.capture_screen(t, self.store.capture_dir)
+            except Exception as e:
+                r = {'ok': False, 'reason': str(e)}
+            if r.get('ok'):
+                self.store.set_capture(t['key'], r['files'], r.get('partial'), r.get('reason'),
+                                       r.get('pins'), r.get('css_w'), r.get('css_h'), r.get('dpr'))
+                out['done'].append(t['screen'])
+                self.log('화면 %d 캡처 완료 - %s%s' % (t['screen'], ' · '.join(r['files']),
+                                                  ' (%s)' % r['reason'] if r.get('partial') else ''))
+            else:
+                out['skipped'].append((t['screen'], r.get('reason') or ''))
+        if out['skipped']:
+            self.log('캡처하지 않은 화면: %s' % ' · '.join('화면 %d(%s)' % s for s in out['skipped']))
+        if not targets:
+            self.log('캡처할 화면이 없습니다(주석이 있는 화면이 없음).')
+        self._msgq.put(('refresh', None))
+        return out
+
+    def send_to_jira(self, text, files, parent=None):
+        """1.2: 사람마다 자기 API 토큰으로 새 이슈를 만들거나 기존 이슈에 댓글을 단다(첨부 포함).
+
+        ★부분 성공을 숨기지 않는다. 새 이슈가 만들어지면 그 즉시 키를 설정에 적고, 첨부가 실패하면
+          결과창에 파일별로 나열한다 - 재시도는 '그 이슈에 첨부만' 다시 한다(중복 생성 금지)."""
+        parent = parent or self
+        cfg = self.jira
+        cfg.load()
+        if not cfg.ready():
+            if messagebox.askyesno('Jira 설정이 필요합니다',
+                                   '이메일과 API 토큰이 아직 없습니다.\n지금 설정할까요?', parent=parent):
+                self.open_jira_settings()
+            return
+        f = self.ui_font
+        win = tk.Toplevel(parent)
+        win.title('Jira 로 보내기')
+        win.configure(bg='#ffffff')
+        win.transient(parent)
+        win.grab_set()
+        win.geometry('560x440')
+        tk.Label(win, bg='#ffffff', font=(f, 11, 'bold'), anchor='w',
+                 text='%s  ·  %s' % (cfg.site, cfg.email)).pack(fill='x', padx=16, pady=(14, 6))
+        mode = tk.StringVar(value=self.settings.get('jira_mode') or 'comment')
+        proj = tk.StringVar(value=cfg.project or '')
+        itype = tk.StringVar(value=cfg.issue_type or jira_api.DEFAULT_ISSUE_TYPE)
+        key = tk.StringVar(value=self.settings.get('jira_last_issue') or '')
+        summary = tk.StringVar(value=jira_api.summary_of(text))
+
+        def row(label, var, width=40, combo=False):
+            r = tk.Frame(win, bg='#ffffff')
+            r.pack(fill='x', padx=32, pady=2)
+            tk.Label(r, bg='#ffffff', font=(f, 9), width=10, anchor='w', text=label).pack(side='left')
+            if combo:
+                # 값은 직접 쳐도 되고(목록을 못 받았을 때) 목록에서 골라도 된다
+                e = ttk.Combobox(r, textvariable=var, font=(f, 10), width=width)
+            else:
+                e = tk.Entry(r, textvariable=var, font=(f, 10), relief='solid', bd=1, width=width)
+            e.pack(side='left', fill='x', expand=True)
+            return e
+
+        tk.Radiobutton(win, text='새 이슈 만들기', value='new', variable=mode, bg='#ffffff',
+                       font=(f, 10, 'bold'), anchor='w').pack(fill='x', padx=16)
+        proj_box = row('프로젝트', proj, combo=True)
+        type_box = row('이슈 유형', itype, combo=True)
+        row('제목', summary)
+        proj_hint = tk.StringVar(value='')
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left', wraplength=500,
+                 textvariable=proj_hint).pack(fill='x', padx=32)
+
+        # 1.2: 프로젝트·유형은 **이 계정이 만들 수 있는 것만** 목록에 띄운다(createmeta).
+        #   /project 전체(90여 개)를 보이면 권한 없는 곳을 골라 403 을 맞고, 'Bug' 처럼 없는 유형을
+        #   치면 400 을 맞는다 - 둘 다 실사용자가 이해할 수 없는 실패다. 목록을 못 받으면 직접 입력.
+        meta = {'list': [], 'by_key': {}}
+
+        def project_key_of(text_value):
+            v = (text_value or '').strip()
+            return v.split(' ', 1)[0].strip() if v else ''
+
+        def refresh_types(*_a):
+            pk = project_key_of(proj.get())
+            info = meta['by_key'].get(pk)
+            if not info:
+                if meta['list']:
+                    proj_hint.set('이 계정이 이슈를 만들 수 없는 프로젝트입니다: %s' % (pk or '(없음)'))
+                return
+            types = info['types'] or []
+            type_box['values'] = types
+            cur = itype.get().strip()
+            if cur not in types:
+                itype.set(jira_api.DEFAULT_ISSUE_TYPE if jira_api.DEFAULT_ISSUE_TYPE in types
+                          else (types[0] if types else cur))
+            req = (info.get('required') or {}).get(itype.get().strip())
+            if req:
+                proj_hint.set('주의: 이 유형은 필수 항목이 더 있어 도구로는 만들 수 없습니다 - %s' % ', '.join(req))
+            else:
+                proj_hint.set('%s · %s' % (info['name'], ' / '.join(types)))
+
+        def fill_meta(items, err):
+            if err or not items:
+                proj_hint.set('프로젝트 목록을 받지 못했습니다(%s) - 키와 유형을 직접 입력하세요.' % (err or '없음'))
+                return
+            meta['list'] = items
+            meta['by_key'] = dict((d['key'], d) for d in items)
+            proj_box['values'] = ['%s  %s' % (d['key'], d['name']) for d in items]
+            pk = project_key_of(proj.get())
+            if pk in meta['by_key']:
+                proj.set('%s  %s' % (pk, meta['by_key'][pk]['name']))
+            refresh_types()
+
+        def load_meta():
+            items, err = None, None
+            try:
+                items = cfg.client().creatable()
+            except Exception as e:
+                err = str(e)
+            self._msgq.put(('call', lambda: fill_meta(items, err)))
+        threading.Thread(target=load_meta, daemon=True).start()
+        proj_hint.set('만들 수 있는 프로젝트 목록을 받는 중…')
+        proj_box.bind('<<ComboboxSelected>>', refresh_types)
+        type_box.bind('<<ComboboxSelected>>', refresh_types)
+        tk.Radiobutton(win, text='기존 이슈에 댓글 달기', value='comment', variable=mode, bg='#ffffff',
+                       font=(f, 10, 'bold'), anchor='w').pack(fill='x', padx=16, pady=(10, 0))
+        row('이슈 키', key)
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
+                 text='파일 %d개를 함께 올립니다(그림·동영상·화면 캡처). 본문은 Jira 위키 형식으로 옮겨 올립니다.'
+                      % len(files or [])).pack(fill='x', padx=16, pady=(12, 0))
+        status = tk.StringVar(value='')
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', textvariable=status
+                 ).pack(fill='x', padx=16, pady=(4, 0))
+
+        def go():
+            m = mode.get()
+            pk = project_key_of(proj.get())
+            if m == 'new' and not (pk and itype.get().strip()):
+                messagebox.showinfo('입력 필요', '프로젝트와 이슈 유형을 고르세요.', parent=win)
+                return
+            if m == 'comment' and not key.get().strip():
+                messagebox.showinfo('입력 필요', '이슈 키(예: SC-123)를 넣으세요.', parent=win)
+                return
+            self.settings['jira_mode'] = m
+            cfg.project, cfg.issue_type = pk, itype.get().strip()
+            try:
+                cfg.save()
+            except Exception:
+                pass
+            btn.configure(state='disabled')
+            status.set('보내는 중… (창을 닫지 마세요)')
+            args = dict(mode=m, md_text=text, files=list(files or []),
+                        project=pk, issue_type=itype.get().strip(),
+                        issue_key=key.get().strip(), summary=summary.get().strip())
+
+            def work():
+                res, err = None, None
+                try:
+                    res = jira_api.send(cfg, log=self.log, **args)
+                except jira_api.JiraError as e:
+                    err = e
+                except Exception as e:
+                    err = e
+                self._msgq.put(('call', lambda: finish(res, err)))
+            threading.Thread(target=work, daemon=True).start()
+
+        def finish(res, err):
+            if res and res.get('key'):
+                self.settings['jira_last_issue'] = res['key']
+                self.save_settings()
+            if err is not None:
+                set_clipboard(text)
+                status.set('실패: %s' % err)
+                try:
+                    btn.configure(state='normal')
+                except Exception:
+                    pass
+                messagebox.showerror('보내지 못했습니다',
+                                     '%s\n\n본문은 클립보드에 담아 두었습니다.' % err, parent=win)
+                return
+            lines = ['%s 에 올렸습니다.' % res['key'], res['url'] or '']
+            if res['uploaded']:
+                lines.append('\n올린 파일 %d개: %s' % (len(res['uploaded']), ', '.join(res['uploaded'])))
+            if res['skipped']:
+                lines.append('\n올리지 못한 파일:')
+                for name, why in res['skipped']:
+                    lines.append('  · %s — %s' % (name, why))
+            self.log('Jira 로 보냈습니다 - %s (%s)' % (res['key'], res['url']))
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            messagebox.showinfo('Jira 로 보냈습니다', '\n'.join(lines), parent=parent)
+
+        bar = tk.Frame(win, bg='#ffffff')
+        bar.pack(fill='x', padx=16, pady=14, side='bottom')
+        ttk.Button(bar, text='취소', command=win.destroy).pack(side='right')
+        btn = ttk.Button(bar, text='보내기', style='Go.TButton', command=go)
+        btn.pack(side='right', padx=(0, 8))
+        ttk.Button(bar, text='Jira 설정', command=self.open_jira_settings).pack(side='left')
+        self.wait_window(win)
+
+    def open_jira_settings(self):
+        """1.2: 사람마다 자기 Jira 토큰. DPAPI 로 이 사용자·이 PC 에서만 풀리게 저장한다."""
+        cfg = self.jira
+        cfg.load()
+        f = self.ui_font
+        win = tk.Toplevel(self)
+        win.title('Jira 설정 (내 토큰)')
+        win.configure(bg='#ffffff')
+        win.transient(self)
+        win.grab_set()
+        win.geometry('600x460')
+        tk.Label(win, bg='#ffffff', font=(f, 11, 'bold'), anchor='w',
+                 text='Jira Cloud 에 내 계정으로 올리기 위한 설정').pack(fill='x', padx=16, pady=(14, 2))
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
+                 text='API 토큰은 한 번만 만들어 넣으면 됩니다(아래 버튼 → [API 토큰 만들기] → 복사 → 붙여넣기).\n'
+                      '토큰은 이 PC 의 내 Windows 계정에서만 풀리게 암호화해 저장합니다(다른 PC 로 복사해도 못 씁니다).\n'
+                      '토큰이 없는 사람은 기존처럼 [이슈에 올리기 (등록은 직접)] 을 쓰면 됩니다.'
+                 ).pack(fill='x', padx=16)
+        ttk.Button(win, text='토큰 발급 페이지 열기 (id.atlassian.com)',
+                   command=lambda: webbrowser.open(jira_api.TOKEN_URL)).pack(anchor='w', padx=16, pady=(6, 2))
+        site = tk.StringVar(value=cfg.site)
+        email = tk.StringVar(value=cfg.email)
+        token = tk.StringVar(value='')
+        proj = tk.StringVar(value=cfg.project)
+        itype = tk.StringVar(value=cfg.issue_type)
+
+        def row(label, var, show=None):
+            r = tk.Frame(win, bg='#ffffff')
+            r.pack(fill='x', padx=16, pady=3)
+            tk.Label(r, bg='#ffffff', font=(f, 9), width=14, anchor='w', text=label).pack(side='left')
+            e = tk.Entry(r, textvariable=var, font=(f, 10), relief='solid', bd=1, show=show)
+            e.pack(side='left', fill='x', expand=True)
+            return e
+        row('사이트', site)
+        row('이메일', email)
+        tok_state = {'file': '저장된 토큰 있음 (바꾸려면 새로 입력)', 'env': '환경변수 JIRA_API_TOKEN 사용 중',
+                     'locked': '저장된 토큰을 이 계정에서 풀 수 없음 - 다시 입력', '': '토큰 없음'}[cfg.token_source]
+        row('API 토큰', token, show='*')
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', text='   ' + tok_state
+                 ).pack(fill='x', padx=16)
+        row('기본 프로젝트 키', proj)
+        row('기본 이슈 유형', itype)
+        status = tk.StringVar(value='')
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', textvariable=status,
+                 wraplength=560, justify='left').pack(fill='x', padx=16, pady=(8, 0))
+
+        def apply_fields():
+            cfg.site = site.get().strip() or jira_api.DEFAULT_SITE
+            cfg.email = email.get().strip()
+            cfg.project = proj.get().strip()
+            cfg.issue_type = itype.get().strip() or jira_api.DEFAULT_ISSUE_TYPE
+
+        def check():
+            apply_fields()
+            t = token.get().strip() or cfg.token
+            if not (cfg.email and t):
+                status.set('이메일과 토큰을 넣으세요.')
+                return
+            status.set('확인 중…')
+            win.update_idletasks()
+            try:
+                me = jira_api.JiraClient(cfg.site, cfg.email, t).myself()
+                status.set('연결됨: %s (%s)' % (me.get('displayName') or '?', me.get('emailAddress') or cfg.email))
+            except Exception as e:
+                status.set('실패: %s' % e)
+
+        def save():
+            apply_fields()
+            try:
+                cfg.save(token=token.get().strip() or None)
+            except Exception as e:
+                messagebox.showerror('저장 실패', str(e), parent=win)
+                return
+            self.log('Jira 설정을 저장했습니다 - %s · %s%s'
+                     % (cfg.site, cfg.email, ' · 토큰 저장(DPAPI)' if token.get().strip() else ''))
+            win.destroy()
+
+        bar = tk.Frame(win, bg='#ffffff')
+        bar.pack(fill='x', padx=16, pady=14, side='bottom')
+        ttk.Button(bar, text='취소', command=win.destroy).pack(side='right')
+        ttk.Button(bar, text='저장', style='Go.TButton', command=save).pack(side='right', padx=(0, 8))
+        ttk.Button(bar, text='연결 확인', command=check).pack(side='left')
 
     def open_help(self):
         """사용법 문서를 기본 브라우저로 연다.
