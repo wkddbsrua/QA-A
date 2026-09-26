@@ -28,6 +28,14 @@ def _now():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
+def _hhmmss(ms):
+    """agentation 의 timestamp(밀리초)를 시:분:초로. 이 값은 지금까지 버려지고 있었다."""
+    try:
+        return datetime.fromtimestamp(float(ms) / 1000.0).strftime('%H:%M:%S')
+    except Exception:
+        return u''
+
+
 def _page_id(url):
     """화면을 가리키는 식별자: 출처 + 경로. 질의문자열·해시는 뗀다.
 
@@ -52,6 +60,11 @@ class Store(object):
         self.jsonl_path = os.path.join(out_dir, 'annotations.jsonl')
         self.lock = threading.RLock()
         self.pages = OrderedDict()      # url -> page dict
+        # ★프로그램이 소유하는 메타. 주석 객체 '안'에 넣지 않는다 -
+        #   apply() 는 브라우저가 보낸 주석 dict 를 id 로 통째 덮어쓰므로,
+        #   사용자가 브라우저에서 메모를 한 번 고치면 우리가 넣은 필드가 날아간다.
+        self.meta = {}                  # aid -> {'note': str, 'refs': [aid, ...]}
+        self.closing = u''              # 총평(추출·복사 때 사람이 적는 마지막 코멘트)
         self._replaying = False
 
     # ── 화면 ──────────────────────────────────────────────────
@@ -135,8 +148,13 @@ class Store(object):
                 for a in anns:
                     for pp in same:
                         pp['annotations'].pop(a.get('id'), None)
+                    # 자기 메타는 버린다. 이 주석을 가리키던 연결은 남겨 두고
+                    # 렌더에서 '(삭제된 주석)' 으로 보여 준다 - 조용히 사라지지 않게.
+                    self.meta.pop(a.get('id'), None)
             elif kind == 'clear':
                 for pp in same:
+                    for aid in list(pp['annotations'].keys()):
+                        self.meta.pop(aid, None)
                     pp['annotations'].clear()
             else:                                   # add · update · submit · copy
                 for a in anns:
@@ -170,18 +188,77 @@ class Store(object):
         pages = [p for p in self.pages.values() if p['annotations']]
         return len(pages), sum(len(p['annotations']) for p in pages)
 
-    def rows(self):
-        """목록용 행. (번호, 제목, 해상도, 주소, 주석수, 콘솔수, 실패요청수)"""
+    def tree_rows(self):
+        """목록용 행. 화면 한 줄 + 그 밑에 붙는 주석 줄들.
+
+        화면 번호는 render() 와 같은 순서로 붙는다(_render_pages 와 같은 필터) -
+        목록의 [화면 2] 와 결과 문서의 [화면 2] 가 어긋나면 연결을 읽을 수 없다."""
         out = []
         with self.lock:
-            i = 0
-            for p in self.pages.values():
-                if not p['annotations'] and not p['console'] and not p['network']:
-                    continue
-                i += 1
-                out.append((i, p['title'] or '(제목 없음)', p['viewport'], p['url'],
-                            len(p['annotations']), len(p['console']), len(p['network'])))
+            # ★render() 와 같은 목록·같은 순서를 쓴다. 따로 걸러 세면 목록의 [화면 2] 와
+            #   결과 문서의 [화면 2] 가 어긋나 연결을 못 읽는다.
+            for i, p in enumerate(self._render_pages(), 1):
+                anns = []
+                for j, (aid, a) in enumerate(p['annotations'].items(), 1):
+                    m = self.meta.get(aid) or {}
+                    anns.append({
+                        'aid': aid, 'no': j,
+                        'element': a.get('element') or u'?',
+                        'comment': a.get('comment') or u'',
+                        'note': m.get('note') or u'',
+                        'refs': len(m.get('refs') or []),
+                    })
+                out.append({
+                    'no': i, 'title': p['title'] or u'(제목 없음)',
+                    'vp': p['viewport'], 'url': p['url'],
+                    'ann': len(p['annotations']), 'con': len(p['console']),
+                    'net': len(p['network']), 'anns': anns,
+                })
         return out
+
+    def all_annotations(self):
+        """연결 대상 고르기용. 화면·주석 번호가 붙은 전체 목록(렌더와 같은 순서)."""
+        out = []
+        with self.lock:
+            for i, p in enumerate(self._render_pages(), 1):
+                for j, (aid, a) in enumerate(p['annotations'].items(), 1):
+                    out.append({
+                        'aid': aid, 'screen': i, 'no': j,
+                        'title': p['title'] or u'(제목 없음)', 'vp': p['viewport'],
+                        'element': a.get('element') or u'?',
+                        'comment': a.get('comment') or u'',
+                    })
+        return out
+
+    def get_meta(self, aid):
+        with self.lock:
+            m = self.meta.get(aid) or {}
+            return {'note': m.get('note') or u'', 'refs': list(m.get('refs') or [])}
+
+    def set_meta(self, aid, note=u'', refs=None):
+        """보충 메모·연결을 저장한다. 둘 다 비면 항목 자체를 지운다."""
+        refs = [r for r in (refs or []) if r and r != aid]
+        seen, uniq = set(), []
+        for r in refs:                              # 중복 제거(순서 유지)
+            if r not in seen:
+                seen.add(r)
+                uniq.append(r)
+        with self.lock:
+            if note or uniq:
+                self.meta[aid] = {'note': note or u'', 'refs': uniq}
+            else:
+                self.meta.pop(aid, None)
+            if not self._replaying:
+                self._append_jsonl({'t': 'meta', 'aid': aid,
+                                    'note': note or u'', 'refs': uniq})
+                self.write_md()
+
+    def set_closing(self, text):
+        with self.lock:
+            self.closing = text or u''
+            if not self._replaying:
+                self._append_jsonl({'t': 'closing', 'text': self.closing})
+                self.write_md()
 
     # ── 저장 ──────────────────────────────────────────────────
     def _append_jsonl(self, rec):
@@ -198,16 +275,46 @@ class Store(object):
         except Exception:
             pass
 
+    def _render_pages(self):
+        """결과에 실리는 화면 목록. 화면 번호는 이 순서로 붙는다(목록과 렌더가 같아야 한다)."""
+        return [p for p in self.pages.values()
+                if p['annotations'] or p['console'] or p['network']]
+
+    def _ref_index(self, pages):
+        """aid -> (화면번호, 주석번호, element, comment). 연결을 사람이 읽는 좌표로 옮긴다.
+
+        ★연결은 aid 로 저장하고 번호는 이 시점에 해석한다. 번호를 저장해 두면
+          화면 순서가 바뀌는 순간(되돌아온 화면·해상도 변경) 참조가 어긋난다."""
+        idx = {}
+        for i, p in enumerate(pages, 1):
+            for j, (aid, a) in enumerate(p['annotations'].items(), 1):
+                idx[aid] = (i, j, a.get('element') or u'?', a.get('comment') or u'')
+        return idx
+
+    def _back_refs(self):
+        """연결의 반대 방향. 어느 쪽 주석을 읽어도 관계가 보이려면 필요하다."""
+        back = {}
+        for src, m in self.meta.items():
+            for dst in (m.get('refs') or []):
+                back.setdefault(dst, []).append(src)
+        return back
+
     def render(self):
         with self.lock:
-            pages = [p for p in self.pages.values()
-                     if p['annotations'] or p['console'] or p['network']]
+            pages = self._render_pages()
             total = sum(len(p['annotations']) for p in pages)
             lines = [u'# 화면 주석 - %s' % _now(), u'',
                      u'- 화면 %d개 · 주석 %d건' % (len(pages), total), u'']
+            if self.closing:
+                # 받는 사람이 먼저 읽는 자리다(요약 바로 밑).
+                lines += [u'## 총평', u'']
+                lines += self.closing.strip().splitlines()
+                lines.append(u'')
             if not pages:
                 lines += [u'---', u'', u'(아직 주석이 없습니다)', u'']
                 return u'\n'.join(lines)
+            refidx = self._ref_index(pages)
+            backidx = self._back_refs()
             for i, p in enumerate(pages, 1):
                 lines += [u'---', u'',
                           u'# [화면 %d] %s  (%s)' % (i, p['title'] or u'(제목 없음)',
@@ -221,17 +328,40 @@ class Store(object):
                 if p['referrer']:
                     lines.append(u'- 이전 화면: %s' % p['referrer'])
                 lines += [u'- 주석 %d건' % len(p['annotations']), u'']
-                lines += self._render_annotations(list(p['annotations'].values()))
+                lines += self._render_annotations(list(p['annotations'].items()),
+                                                  refidx, backidx)
                 lines += self._render_noise(p)
             return u'\n'.join(lines)
 
     @staticmethod
-    def _render_annotations(anns):
+    def _ref_label(refidx, aid):
+        hit = refidx.get(aid)
+        if not hit:
+            return u'(삭제된 주석)'
+        i, j, element, comment = hit
+        tail = u' — "%s"' % comment[:40] if comment else u''
+        return u'[화면 %d] %d번 %s%s' % (i, j, element, tail)
+
+    def _render_annotations(self, items, refidx, backidx):
         lines = []
-        for i, a in enumerate(anns, 1):
+        for i, (aid, a) in enumerate(items, 1):
+            m = self.meta.get(aid) or {}
             lines += [u'## %d. %s' % (i, a.get('element') or u'?'), u'',
-                      u'> %s' % (a.get('comment') or u'(메모 없음)'), u'',
-                      u'- 경로: `%s`' % (a.get('elementPath') or u''),
+                      u'> %s' % (a.get('comment') or u'(메모 없음)'), u'']
+            ts = _hhmmss(a.get('timestamp'))
+            if ts:
+                # ★이어지는 액션의 순서는 여기서만 읽을 수 있다(화면 키에는 시간이 없다).
+                lines.append(u'- 시각: %s' % ts)
+            if m.get('note'):
+                note = m['note'].strip().splitlines()
+                lines.append(u'- 보충: %s' % note[0])
+                for extra in note[1:]:              # 두 칸 들여쓰기로 같은 항목을 잇는다
+                    lines.append(u'  %s' % extra)
+            for dst in (m.get('refs') or []):
+                lines.append(u'- 관련: → %s' % self._ref_label(refidx, dst))
+            for src in backidx.get(aid, []):
+                lines.append(u'- 관련: ← %s' % self._ref_label(refidx, src))
+            lines += [u'- 경로: `%s`' % (a.get('elementPath') or u''),
                       u'- 클래스: `%s`' % (a.get('cssClasses') or u'')]
             if a.get('selectedText'):
                 lines.append(u'- 선택 텍스트: %s' % a['selectedText'])
@@ -296,6 +426,12 @@ class Store(object):
                                              rec.get('reason') or '')
                         elif t == 'merge':
                             self.merge_unknown(rec.get('url'), rec.get('viewport'))
+                        elif t == 'meta':
+                            self.set_meta(rec.get('aid'), rec.get('note') or u'',
+                                          rec.get('refs') or [])
+                        elif t == 'closing':
+                            self.set_closing(rec.get('text') or u'')
+                        # 모르는 t 는 무시한다 - 옛 파일과 앞으로의 확장 양쪽을 위해.
             finally:
                 self._replaying = False
             self.write_md()
@@ -329,4 +465,6 @@ class Store(object):
                 except Exception:
                     pass
             self.pages.clear()
+            self.meta.clear()
+            self.closing = u''
             self.write_md()

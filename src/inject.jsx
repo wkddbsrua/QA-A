@@ -14,6 +14,7 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
 
 (function boot() {
     var HOST_ID = '__qa_annotator_host';
+    var TOP_ID = '__qa_top_layer';      // 우리 UI 를 담아 top layer 로 올리는 투명한 틀
 
     /* ★이 인스턴스가 담당하는 문서. iframe 은 보통 빈 문서(about:blank)로 먼저
      *   만들어지고 곧바로 실제 주소로 바뀌는데, 그때 크롬은 window 를 재사용한다.
@@ -130,6 +131,11 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         root = null;
         var host = document.getElementById(HOST_ID);
         if (host && host.parentNode) host.parentNode.removeChild(host);
+        var frame = document.getElementById(TOP_ID);
+        if (frame) {
+            try { frame.hidePopover(); } catch (e) { /* 무시 */ }
+            if (frame.parentNode) frame.parentNode.removeChild(frame);
+        }
         window.__QA_ANNOTATOR__ = false;
     }
 
@@ -144,6 +150,8 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         document.body.appendChild(host);
 
         root = createRoot(host);
+        // 렌더 뒤에 UI 가 body 로 포털되므로, 그다음 틱에 틀로 모아 올린다.
+        setTimeout(keepOnTop, 0);
         root.render(
             React.createElement(Agentation, {
                 // 메모를 다는 즉시 넘긴다. Copy/Send 를 눌러야만 전송되던 것이
@@ -156,6 +164,168 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
                 onSubmit: function (out, as) { push('submit', out, as); }
             })
         );
+    }
+
+    /* ── 모달 위로 올라가기 ───────────────────────────────────
+     * ★z-index 로는 이길 수 없다. 우리 최대값은 100020 인데 페이지는 2147483647 을
+     *   쓸 수 있고, 그러면 툴바가 모달 밑에 깔려 아무것도 고를 수 없다.
+     *   "어떤 사이트에서나" 도구이므로 사이트별 숫자를 맞추는 길은 없다.
+     *
+     * 실측(Chrome 151, CDP 로 진짜 마우스 클릭을 보내 카운터로 확인):
+     *   · 보통 요소(z=100020) vs 페이지 오버레이 z=2147483647 → 우리가 진다
+     *   · popover(top layer)  vs 같은 오버레이               → 우리가 이긴다
+     *   · popover vs dialog.showModal()                     → 막힌다(순서 무관).
+     *     top layer 안에서도 모달이 최상위고 나머지는 inert 가 된다
+     *   · UI 를 그 모달 dialog '안' 으로 옮기면                → 클릭·React 이벤트
+     *     위임·position:fixed 좌표가 모두 정상. 페이지 모달은 손대지 않는다
+     * 그래서: 평소엔 popover 로 올리고, native 모달이 열리면 그 안으로 옮긴다.
+     */
+    function topFrame() {
+        var el = document.getElementById(TOP_ID);
+        if (el) return el;
+        el = document.createElement('div');
+        el.id = TOP_ID;
+        // UA 의 popover 기본 스타일(inset:0·margin:auto·테두리·배경·overflow)을 전부
+        // 되돌린다. 우리는 '보이지 않는 틀' 만 필요하다. 클릭은 안 가로챈다
+        // (자식 중 pointer-events:auto 인 것만 받는다 - 기존 동작과 같다).
+        el.style.cssText = 'position:fixed;inset:0;display:block;margin:0;border:0;' +
+            'padding:0;width:auto;height:auto;max-width:none;max-height:none;' +
+            'min-width:0;min-height:0;background:none;overflow:visible;' +
+            'pointer-events:none;color:inherit;';
+        document.body.appendChild(el);
+        return el;
+    }
+
+    /* ★실패하면 popover 속성을 반드시 떼야 한다. 속성이 붙은 채 showPopover() 가
+     *   안 되면 UA 스타일이 display:none 으로 만들어 툴바가 통째로 사라진다 -
+     *   이 도구에서 가장 나쁜 결과다(그래서 성공을 :popover-open 으로 확인한다). */
+    function promote(el) {
+        if (typeof el.showPopover !== 'function') return false;
+        try {
+            if (!el.hasAttribute('popover')) el.setAttribute('popover', 'manual');
+            if (!el.matches(':popover-open')) el.showPopover();
+            if (el.matches(':popover-open')) return true;
+        } catch (e) { /* 아래에서 되돌린다 */ }
+        try { el.removeAttribute('popover'); } catch (e) { /* 무시 */ }
+        return false;
+    }
+
+    function topmostModalDialog() {
+        // 열려 있는 native 모달. top layer 순서는 노출되지 않으므로 DOM 순서상 마지막을 쓴다.
+        try {
+            var ds = document.querySelectorAll('dialog[open]');
+            var found = null;
+            for (var i = 0; i < ds.length; i++) {
+                if (ds[i].matches(':modal')) found = ds[i];
+            }
+            return found;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /* 진단은 숫자로(README 7). "안 올라갔다" 를 추측하지 않게 센다. */
+    var topStats = { calls: 0, moves: 0, intoModal: 0, promoted: 0, err: '' };
+
+    function keepOnTop() {
+        topStats.calls++;
+        if (!isMine() || !mounted()) return;
+        try {
+            var frame = topFrame();
+            // ①agentation 은 UI 를 document.body 로 포털한다. 그 래퍼를 틀 안으로 모은다.
+            var nodes = document.querySelectorAll('body > [data-agentation-root]');
+            for (var i = 0; i < nodes.length; i++) {
+                if (nodes[i] !== frame) {
+                    frame.appendChild(nodes[i]);
+                    topStats.moves++;
+                }
+            }
+            // ②native 모달이 열려 있으면 그 안이 inert 를 면제받는 유일한 자리다(실측).
+            var want = topmostModalDialog() || document.body;
+            if (frame.parentNode !== want) {
+                want.appendChild(frame);
+                if (want !== document.body) topStats.intoModal++;
+            }
+            // ③DOM 을 옮기면 popover 는 닫힌다 - 매번 다시 올린다.
+            if (promote(frame)) topStats.promoted++;
+        } catch (e) {
+            topStats.err = String(e && e.message || e);
+        }
+    }
+
+    /* 모달은 예고 없이 열린다. 주기 검사(2초)만으로는 늦으므로 두 가지를 더 본다:
+     *   · dialog 의 open 속성 변화(native 모달)
+     *   · 클릭 직후(대부분의 모달이 클릭으로 열린다) */
+    function watchTop() {
+        var pending = null;
+        function soon() {
+            if (pending) clearTimeout(pending);
+            pending = setTimeout(function () { pending = null; keepOnTop(); }, 60);
+        }
+        try {
+            new MutationObserver(soon).observe(document.documentElement, {
+                subtree: true, attributes: true, attributeFilter: ['open']
+            });
+        } catch (e) { /* 관찰 불가 - 주기 검사로 버틴다 */ }
+        document.addEventListener('click', soon, true);
+    }
+
+    /* ── Esc 보호 ─────────────────────────────────────────────
+     * ★사용법이 안내하는 "Esc 로 모드 끄기" 가 페이지의 모달까지 닫아 버린다.
+     *   지적하려던 모달이 사라지므로 주석을 남길 수 없다. 모달이 열려 있는 동안에는
+     *   Esc 를 페이지로 넘기지 않는다(주석 도구 자신은 그대로 받는다 - 우리보다
+     *   먼저 걸리는 리스너가 없도록 capture 단계에서 페이지 쪽만 끊는다).
+     *   모달 판정은 표준 신호(dialog[open]·aria-modal·role=dialog)로만 한다.
+     *   그 표시가 없는 모달은 가려낼 수 없다 - 그때는 툴바의 [나가기] 로 끈다.
+     */
+    function pageModalOpen() {
+        try {
+            if (topmostModalDialog()) return true;
+            var cands = document.querySelectorAll('[aria-modal="true"], [role="dialog"]');
+            for (var i = 0; i < cands.length; i++) {
+                var el = cands[i];
+                if (el.id === TOP_ID || el.closest('#' + TOP_ID)) continue;   // 우리 UI 제외
+                if (el.closest('[data-agentation-root]')) continue;
+                var r = el.getBoundingClientRect();
+                if (r.width < 40 || r.height < 40) continue;
+                var st = getComputedStyle(el);
+                if (st.display === 'none' || st.visibility === 'hidden') continue;
+                if (parseFloat(st.opacity || '1') < 0.05) continue;
+                return true;
+            }
+        } catch (e) { /* 무시 */ }
+        return false;
+    }
+
+    /* 주석 모드가 켜져 있는가. 커서 스타일이 모드와 함께 생겼다 사라진다 -
+     * 우리가 가진 신호 중 이것만 모드와 정확히 같이 움직인다(실측). */
+    function modeOn() {
+        return !!document.getElementById('feedback-cursor-styles');
+    }
+
+    function guardEsc() {
+        /* ①페이지 스크립트가 닫는 모달(div 오버레이 계열) - 전파를 끊는다. */
+        document.addEventListener('keydown', function (e) {
+            if (e.key !== 'Escape') return;
+            if (!mounted() || !modeOn() || !pageModalOpen()) return;
+            e.stopPropagation();
+            if (window.console) {
+                console.info('[화면주석] 모달이 열려 있어 Esc 를 페이지로 넘기지 않았습니다.');
+            }
+        }, true);
+
+        /* ★②native <dialog> 는 페이지가 아니라 브라우저가 닫는다(close request).
+         *   전파를 끊어도 닫히므로 cancel 을 막아야 한다(실측: stopPropagation 만
+         *   걸었을 때 모달이 그대로 닫혔다). */
+        document.addEventListener('cancel', function (e) {
+            if (!mounted() || !modeOn()) return;
+            var t = e.target;
+            if (!t || !t.tagName || t.tagName !== 'DIALOG') return;
+            e.preventDefault();
+            if (window.console) {
+                console.info('[화면주석] 주석 모드라서 Esc 로 모달을 닫지 않았습니다.');
+            }
+        }, true);
     }
 
     /* ── 화면 정보 통지 · 감시 ───────────────────────────────── */
@@ -188,6 +358,7 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
             }
             if (mounted()) {
                 if (!shouldMount()) unmount();
+                else keepOnTop();            // 모달이 열렸다 닫혔을 수 있다
             } else {
                 mount();
             }
@@ -207,6 +378,26 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
      *   (실측: feedback-annotations-/dashboard 3건이 남아 있었다).
      *   그래서 프로그램이 이 함수를 불러 ②까지 비운다. 설정(핀 색상·테마)은 남긴다.
      *   비운 뒤 툴바를 다시 붙여야 React 가 빈 저장소를 다시 읽는다(새로고침 불필요). */
+    /* 진단용. "왜 모달 위로 안 올라갔나" 를 추측하지 말고 이 값을 읽는다. */
+    window.__qaTop = function () {
+        var frame = document.getElementById(TOP_ID);
+        var modal = topmostModalDialog();
+        return {
+            frame: !!frame,
+            popoverOpen: !!(frame && frame.hasAttribute('popover') &&
+                            frame.matches(':popover-open')),
+            parent: frame && frame.parentNode
+                ? (frame.parentNode.tagName + (frame.parentNode.id ? '#' + frame.parentNode.id : ''))
+                : null,
+            uiInFrame: frame ? frame.querySelectorAll('[data-agentation-root]').length : 0,
+            uiInBody: document.querySelectorAll('body > [data-agentation-root]').length,
+            modalDialogOpen: !!modal,
+            pageModalOpen: pageModalOpen(),
+            modeOn: modeOn(),
+            stats: topStats
+        };
+    };
+
     window.__qaClear = function () {
         var removed = 0;
         try {
@@ -234,6 +425,8 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         mount();
         announce();
         watchFrames();
+        watchTop();
+        guardEsc();
         window.addEventListener('resize', onResize);
     }
 

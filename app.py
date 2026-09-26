@@ -338,7 +338,12 @@ class App(tk.Tk):
         ttk.Button(bar, text='클립보드 복사', command=self.do_copy).pack(side='right', padx=(0, 8))
 
         cols = ('no', 'title', 'vp', 'url', 'ann', 'con', 'net')
-        self.tree = ttk.Treeview(wrap, columns=cols, show='headings', height=11)
+        # ★화면 밑에 주석을 펼친다(show 에 'tree' 를 넣어야 펼침 화살표가 생긴다).
+        #   주석 줄을 더블클릭하면 보충 메모·연결을 넣는 창이 열린다 - 버튼을 늘리지 않는다.
+        self.tree = ttk.Treeview(wrap, columns=cols, show='tree headings', height=11)
+        self.tree.column('#0', width=26, minwidth=26, stretch=False)
+        self.tree.bind('<Double-1>', self.on_row_open)
+        self._tree_sig = None
         # 해상도는 화면 정체성의 일부다(같은 주소라도 해상도가 다르면 다른 줄).
         for key, label, width, anchor in (
                 ('no', '화면', 44, 'center'), ('title', '제목', 190, 'w'),
@@ -474,20 +479,240 @@ class App(tk.Tk):
     def refresh(self):
         pages, total = self.store.counts()
         self.count_text.set('화면 %d개 · 주석 %d건' % (pages, total))
-        rows = self.store.rows()
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
-        for r in rows:
-            self.tree.insert('', 'end', values=r)
+        self._fill_tree()
         if self.launcher and not self.launcher.alive():
             self.set_status(False, '브라우저 닫힘')
             self.launcher = None
         self.after(1000, self.refresh)
 
+    # ── 목록(화면 > 주석) ─────────────────────────────────────
+    @staticmethod
+    def _screen_iid(row):
+        # 화면 정체성은 (주소, 해상도) 다 - 번호가 아니라 그걸로 줄을 식별해야
+        # 새 화면이 끼어들어도 펼친 상태가 딴 줄로 옮겨가지 않는다.
+        return 'p|%s|%s' % (row['url'], row['vp'])
+
+    def _fill_tree(self):
+        rows = self.store.tree_rows()
+        # ★1초마다 통째로 다시 그리면 펼친 것이 접히고 선택이 풀린다.
+        #   내용이 그대로면 손대지 않는다.
+        sig = repr([(r['no'], r['title'], r['vp'], r['url'], r['ann'], r['con'], r['net'],
+                     [(a['aid'], a['comment'], a['note'], a['refs']) for a in r['anns']])
+                    for r in rows])
+        if sig == self._tree_sig:
+            return
+        self._tree_sig = sig
+        opened = set()
+        for iid in self.tree.get_children(''):
+            if self.tree.item(iid, 'open'):
+                opened.add(iid)
+        sel = self.tree.selection()
+        for iid in self.tree.get_children(''):
+            self.tree.delete(iid)
+        for r in rows:
+            pid = self._screen_iid(r)
+            self.tree.insert('', 'end', iid=pid, open=(pid in opened),
+                             values=(r['no'], r['title'], r['vp'], r['url'],
+                                     r['ann'], r['con'], r['net']))
+            for a in r['anns']:
+                mark = ''
+                if a['note']:
+                    mark += ' ✎'                    # 보충 메모가 있다
+                if a['refs']:
+                    mark += ' ↔%d' % a['refs']      # 연결이 있다
+                memo = (a['comment'] or '(메모 없음)').replace('\n', ' ')
+                if len(memo) > 60:
+                    memo = memo[:60] + '…'
+                self.tree.insert(pid, 'end', iid='a|%s' % a['aid'],
+                                 values=('%d.' % a['no'],
+                                         '%s — %s%s' % (a['element'], memo, mark),
+                                         '', '', '', '', ''))
+        for iid in sel:
+            if self.tree.exists(iid):
+                self.tree.selection_add(iid)
+
+    def on_row_open(self, _event=None):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        if not iid.startswith('a|'):
+            # 화면 줄이면 펼치기/접기만 한다.
+            self.tree.item(iid, open=not self.tree.item(iid, 'open'))
+            return
+        self.open_annotation(iid[2:])
+
+    def open_annotation(self, aid):
+        """주석 하나에 보충 메모와 연결을 넣는다.
+
+        ★원본 메모(comment)는 건드리지 않는다. 그건 브라우저(agentation)가 소유하고,
+          사용자가 핀을 눌러 고치면 그 값으로 덮어써진다. 우리가 적는 것은 별도로 둔다."""
+        info = None
+        for x in self.store.all_annotations():
+            if x['aid'] == aid:
+                info = x
+                break
+        if info is None:
+            messagebox.showinfo('없는 주석', '목록이 갱신된 것 같습니다. 다시 골라 주세요.')
+            return
+        meta = self.store.get_meta(aid)
+        f = self.ui_font
+
+        win = tk.Toplevel(self)
+        win.title('주석 보강 — [화면 %d] %d번' % (info['screen'], info['no']))
+        win.configure(bg='#ffffff')
+        win.transient(self)
+        win.geometry('620x560')
+        pad = {'padx': 16}
+
+        tk.Label(win, bg='#ffffff', font=(f, 11, 'bold'), anchor='w',
+                 text='[화면 %d] %d번  %s' % (info['screen'], info['no'], info['element'])
+                 ).pack(fill='x', pady=(14, 2), **pad)
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
+                 text='%s  (%s)' % (info['title'], info['vp'])).pack(fill='x', **pad)
+
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w',
+                 text='브라우저에서 적은 메모 (여기서는 고치지 않습니다)'
+                 ).pack(fill='x', pady=(12, 2), **pad)
+        ro = tk.Text(win, height=3, font=(f, 10), bg='#f4f5f7', relief='flat', wrap='word')
+        ro.insert('1.0', info['comment'] or '(메모 없음)')
+        ro.configure(state='disabled')
+        ro.pack(fill='x', **pad)
+
+        tk.Label(win, bg='#ffffff', font=(f, 10, 'bold'), anchor='w',
+                 text='보충 메모').pack(fill='x', pady=(14, 2), **pad)
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
+                 text='앞뒤 조작·재현 조건처럼 나중에 덧붙일 설명을 적습니다. 결과 문서의 "보충" 줄이 됩니다.'
+                 ).pack(fill='x', **pad)
+        note = tk.Text(win, height=5, font=(f, 10), relief='solid', bd=1, wrap='word')
+        note.insert('1.0', meta['note'])
+        note.pack(fill='x', **pad)
+
+        tk.Label(win, bg='#ffffff', font=(f, 10, 'bold'), anchor='w',
+                 text='관련 주석 (원인이 다른 화면에 있을 때)').pack(fill='x', pady=(14, 2), **pad)
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
+                 text='연결하면 양쪽 결과에 서로를 가리키는 줄이 함께 들어갑니다.'
+                 ).pack(fill='x', **pad)
+        box = tk.Frame(win, bg='#ffffff')
+        box.pack(fill='both', expand=True, pady=(2, 0), **pad)
+        lst = tk.Listbox(box, font=(f, 10), height=5, relief='solid', bd=1,
+                         activestyle='none', exportselection=False)
+        lst.pack(side='left', fill='both', expand=True)
+        side = tk.Frame(box, bg='#ffffff')
+        side.pack(side='right', fill='y', padx=(8, 0))
+
+        refs = list(meta['refs'])
+        label_of = {}
+        for x in self.store.all_annotations():
+            memo = (x['comment'] or '')[:34]
+            label_of[x['aid']] = '[화면 %d] %d번 %s%s' % (
+                x['screen'], x['no'], x['element'], ' — "%s"' % memo if memo else '')
+
+        def redraw():
+            lst.delete(0, 'end')
+            for r in refs:
+                lst.insert('end', label_of.get(r, '(삭제된 주석)'))
+
+        def add_ref():
+            pick = tk.Toplevel(win)
+            pick.title('연결할 주석 고르기')
+            pick.configure(bg='#ffffff')
+            pick.transient(win)
+            pick.geometry('640x420')
+            tk.Label(pick, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
+                     text='이 주석의 원인이 되는(또는 관련된) 주석을 고릅니다.'
+                     ).pack(fill='x', padx=14, pady=(12, 4))
+            pl = tk.Listbox(pick, font=(f, 10), relief='solid', bd=1, exportselection=False)
+            pl.pack(fill='both', expand=True, padx=14)
+            cand = [x for x in self.store.all_annotations()
+                    if x['aid'] != aid and x['aid'] not in refs]
+            for x in cand:
+                pl.insert('end', label_of[x['aid']])
+            if not cand:
+                pl.insert('end', '(연결할 다른 주석이 없습니다)')
+
+            def take():
+                i = pl.curselection()
+                if i and cand:
+                    refs.append(cand[i[0]]['aid'])
+                    redraw()
+                pick.destroy()
+            bar = tk.Frame(pick, bg='#ffffff')
+            bar.pack(fill='x', padx=14, pady=12)
+            ttk.Button(bar, text='취소', command=pick.destroy).pack(side='right')
+            ttk.Button(bar, text='연결', command=take).pack(side='right', padx=(0, 8))
+            pl.bind('<Double-1>', lambda e: take())
+
+        def del_ref():
+            i = lst.curselection()
+            if i:
+                refs.pop(i[0])
+                redraw()
+
+        ttk.Button(side, text='연결 추가', command=add_ref).pack(fill='x')
+        ttk.Button(side, text='연결 제거', command=del_ref).pack(fill='x', pady=(6, 0))
+        redraw()
+
+        def save():
+            self.store.set_meta(aid, note.get('1.0', 'end').strip(), refs)
+            self._tree_sig = None               # 다음 갱신에서 다시 그리게 한다
+            self.log('주석 보강 저장 - [화면 %d] %d번 (연결 %d건)'
+                     % (info['screen'], info['no'], len(refs)))
+            win.destroy()
+
+        bar = tk.Frame(win, bg='#ffffff')
+        bar.pack(fill='x', pady=14, **pad)
+        ttk.Button(bar, text='취소', command=win.destroy).pack(side='right')
+        ttk.Button(bar, text='저장', style='Go.TButton', command=save).pack(side='right', padx=(0, 8))
+        note.focus_set()
+
+    def ask_closing(self):
+        """총평(마지막 코멘트)을 받는다. 취소하면 None - 그때는 복사·추출을 하지 않는다.
+
+        결과 문서 맨 앞(요약 바로 밑)에 들어간다 - 받는 개발자가 먼저 읽는 자리다."""
+        f = self.ui_font
+        win = tk.Toplevel(self)
+        win.title('총평 (마지막 코멘트)')
+        win.configure(bg='#ffffff')
+        win.transient(self)
+        win.grab_set()
+        win.geometry('600x330')
+
+        tk.Label(win, bg='#ffffff', font=(f, 11, 'bold'), anchor='w',
+                 text='마지막으로 덧붙일 말이 있나요?').pack(fill='x', padx=16, pady=(16, 2))
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
+                 text='결과 문서 맨 앞에 "총평" 으로 들어갑니다. 없으면 [건너뛰기].'
+                 ).pack(fill='x', padx=16)
+        txt = tk.Text(win, height=7, font=(f, 10), relief='solid', bd=1, wrap='word')
+        txt.insert('1.0', self.store.closing)
+        txt.pack(fill='both', expand=True, padx=16, pady=(8, 0))
+
+        out = {'ok': False}
+
+        def ok():
+            out['ok'] = True
+            self.store.set_closing(txt.get('1.0', 'end').strip())
+            win.destroy()
+
+        def skip():
+            out['ok'] = True                    # 진행은 한다. 총평만 그대로 둔다.
+            win.destroy()
+
+        bar = tk.Frame(win, bg='#ffffff')
+        bar.pack(fill='x', padx=16, pady=14)
+        ttk.Button(bar, text='취소', command=win.destroy).pack(side='right')
+        ttk.Button(bar, text='건너뛰기', command=skip).pack(side='right', padx=(0, 8))
+        ttk.Button(bar, text='확인', style='Go.TButton', command=ok).pack(side='right', padx=(0, 8))
+        txt.focus_set()
+        self.wait_window(win)
+        return out['ok']
+
     def do_copy(self):
         pages, total = self.store.counts()
         if not total:
             messagebox.showinfo('내용 없음', '아직 주석이 없습니다.')
+            return
+        if not self.ask_closing():
             return
         text = self.store.render()
         if set_clipboard(text):
@@ -512,6 +737,8 @@ class App(tk.Tk):
         if not total:
             messagebox.showinfo('내용 없음', '아직 주석이 없습니다.')
             return
+        if not self.ask_closing():
+            return
         default = '화면주석-%s.md' % datetime.now().strftime('%Y%m%d-%H%M')
         path = filedialog.asksaveasfilename(
             title='어디에 저장할까요?', initialfile=default,
@@ -524,6 +751,7 @@ class App(tk.Tk):
             # 저장이 실패하면 목록을 지우지 않는다(잃는 것보다 중복이 낫다).
             messagebox.showerror('저장 실패', '%s\n\n목록은 그대로 두었습니다.' % e)
             return
+        self._tree_sig = None
         n = self.clear_browser_side()
         self.log('추출 완료 - %s (화면 %d개 · 주석 %d건). 목록을 비웠습니다%s.'
                  % (path, pages, total, ' · 브라우저 이력 %d건도 비움' % n if n else ''))
@@ -546,6 +774,7 @@ class App(tk.Tk):
                                    % (pages, total)):
             return
         self.store.reset()
+        self._tree_sig = None
         n = self.clear_browser_side()
         self.log('목록을 비웠습니다(원본은 archive 에 보관)%s.'
                  % (' · 브라우저 이력 %d건도 비움' % n if n else ''))
