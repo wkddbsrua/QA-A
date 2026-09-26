@@ -10,8 +10,8 @@ VERSION 은 사람이 올린다(동작이 바뀔 때).  BUILD 는 build_exe.py �
 사람이 손으로 올리면 반드시 잊는다.
 """
 
-VERSION = '1.0'
-BUILD = 1     # 0 = build_exe.py 를 거치지 않은 소스
+VERSION = '1.1'
+BUILD = 6     # 0 = build_exe.py 를 거치지 않은 소스
 
 
 def label():

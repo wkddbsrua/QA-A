@@ -165,10 +165,13 @@ def free_port():
 class Session(object):
     """붙은 타깃 하나. 그 타깃의 최상위 문서 주소를 들고 있어야 콘솔·네트워크를 귀속할 수 있다."""
 
-    def __init__(self, sid, target_id, ttype):
+    def __init__(self, sid, target_id, ttype, parent=None):
         self.sid = sid
         self.target_id = target_id
         self.type = ttype
+        # 이 타깃을 물고 온 세션. OOPIF(별도 프로세스 iframe)는 부모를 타고 올라가면
+        # 그 탭의 page 세션이 나온다 - '같은 탭' 을 가리기 위한 유일한 단서다.
+        self.parent = parent
         self.url = ''
         self.page_key = None        # (주소, 해상도) - 콘솔·네트워크를 붙일 화면
         self.req_urls = {}          # requestId -> url
@@ -208,6 +211,9 @@ class Launcher(object):
         #   연결 직후(about:blank)에는 지울 수 없다. 그래서 화면이 실제로 열릴 때 출처별로 한 번씩 지운다.
         self.clear_stale = False
         self._cleared_origins = set()
+        # 탭(최상위 세션)별로 '지금 주석 모드인가'. 셸이 iframe 을 갈아끼우면
+        # 새 문서는 항상 꺼진 채로 시작하므로, 붙는 즉시 여기 값으로 맞춰 준다.
+        self._tab_mode = {}
         # ★타깃 설정은 반드시 별도 스레드에서 한다.
         #   Target.attachedToTarget 은 CDP 수신 스레드에서 불리는데, 그 안에서 다시
         #   응답을 기다리면 수신이 멈춰 데드락이 된다(실측: Page.enable 응답 시간 초과).
@@ -374,7 +380,7 @@ class Launcher(object):
                                         'waitForDebuggerOnStart': True,
                                         'flatten': True}, wait=False)
 
-    def _on_attached(self, params, _sid):
+    def _on_attached(self, params, parent_sid):
         info = params.get('targetInfo') or {}
         sid = params.get('sessionId')
         ttype = info.get('type')
@@ -383,7 +389,7 @@ class Launcher(object):
             # 확장·서비스워커·데브툴 타깃은 건너뛴다
             self._jobs.put(lambda: self._resume(sid, waiting))
             return
-        s = Session(sid, info.get('targetId'), ttype)
+        s = Session(sid, info.get('targetId'), ttype, parent=parent_sid)
         s.url = info.get('url') or ''
         self.sessions[sid] = s
 
@@ -403,33 +409,42 @@ class Launcher(object):
             pass
 
     def _setup(self, s):
-        c = self.cdp
-        c.call('Page.enable', session_id=s.sid)
-        c.call('Runtime.enable', session_id=s.sid)
-        c.call('Network.enable', session_id=s.sid)
-        c.call('Runtime.addBinding', {'name': BINDING}, session_id=s.sid)
-        c.call('Page.addScriptToEvaluateOnNewDocument',
-               {'source': self._source()}, session_id=s.sid)
+        def step(method, params=None, **kw):
+            """★한 명령이 실패해도 나머지는 계속한다.
+
+            예전에는 첫 줄(Page.enable)이 한 번 시간 초과되면 예외가 그대로 올라가서
+            그 뒤의 addBinding·addScriptToEvaluateOnNewDocument 까지 통째로 건너뛰었다.
+            그 타깃은 다시 시도하는 길이 없어 그 세션 내내 툴바가 뜨지 않는다 -
+            셸의 콘텐츠 iframe 이 이렇게 되면 화면에는 최상위 툴바만 남아
+            "gnb·lnb 만 잡힌다" 가 된다."""
+            try:
+                return self.cdp.call(method, params, session_id=s.sid, **kw)
+            except Exception as e:
+                self.log('%s 실패(%s): %s' % (method, s.type, e))
+                return None
+
+        # ★주입에 필요한 둘(바인딩·새 문서 등록)을 먼저 건다. 뒤가 늦어도 툴바는 뜬다.
+        step('Runtime.enable')
+        step('Runtime.addBinding', {'name': BINDING})
+        step('Page.enable')
+        step('Page.addScriptToEvaluateOnNewDocument', {'source': self._source()})
+        step('Network.enable')
         # 하위 프레임(별도 프로세스로 뜬 iframe)도 같은 처리를 받게 한다
-        c.call('Target.setAutoAttach', {'autoAttach': True,
-                                        'waitForDebuggerOnStart': True,
-                                        'flatten': True}, session_id=s.sid, wait=False)
+        step('Target.setAutoAttach', {'autoAttach': True,
+                                      'waitForDebuggerOnStart': True,
+                                      'flatten': True}, wait=False)
         # 이미 문서가 떠 있는 타깃에는 지금 한 번 넣는다(다음 문서부터는 위 등록이 처리).
         # ★프레임마다 넣어야 한다. Runtime.evaluate 를 contextId 없이 부르면 최상위
         #   프레임에만 들어가서, 셸처럼 콘텐츠가 iframe 안에 있는 화면은 "정작 주석을
         #   달아야 하는 영역에 툴바가 없는" 상태가 된다(실측: ww2 /shell 의 dashboard
         #   iframe 에 바인딩은 있는데 마운트 플래그가 없었다).
+        # ★단 '이미 들어가 있는지' 를 먼저 본다. 브라우저를 열어 둔 채 프로그램만 다시
+        #   켜면(흔한 사용법) 여기서 두 번째 인스턴스가 통째로 들어가, 한 문서에 리스너와
+        #   타이머가 두 벌씩 돌았다(실측: 재접속 뒤 __qaInjected=2 · document.__qaDoc=2).
         if s.url and not s.url.startswith('about:'):
             time.sleep(0.4)                     # executionContextCreated 가 도착할 틈
-            targets = list(s.contexts.values()) or [None]
-            for ctx in targets:
-                params = {'expression': self._source(), 'awaitPromise': False}
-                if ctx is not None:
-                    params['contextId'] = ctx
-                try:
-                    c.call('Runtime.evaluate', params, session_id=s.sid)
-                except WSError:
-                    pass
+            for ctx in (list(s.contexts.values()) or [None]):
+                self._inject_if_missing(s.sid, ctx)
 
     def _on_context(self, params, sid):
         ctx = params.get('context') or {}
@@ -445,26 +460,65 @@ class Launcher(object):
         #   Page.addScriptToEvaluateOnNewDocument 가 iframe 의 실제 문서에는 걸리지
         #   않는 경우가 있다(실측: ww2 /shell 을 새로 띄우면 iframe 주입 1회 = 빈 문서
         #   뿐이고 스타일 0개, 툴바 없음). 그래서 등록에만 의존하지 않는다.
-        #   두 번 들어가도 해가 없다 - 두 번째 인스턴스는 이미 뜬 툴바를 보고 물러난다.
-        self._jobs.put(lambda: self._ensure_injected(sid, cid))
+        self._later(0.4, lambda: self._inject_if_missing(sid, cid))
 
-    def _ensure_injected(self, sid, cid, delay=0.4):
-        time.sleep(delay)                   # 등록된 스크립트가 먼저 돌 틈을 준다
+    def _later(self, delay, fn):
+        """작업 스레드를 재우지 않고 나중에 시킨다.
+
+        ★예전에는 큐를 잡은 채 time.sleep 을 했다. 새로 붙는 타깃은 디버거를 기다리며
+          '멈춘 채' 그 큐를 기다리므로, 프레임이 여럿인 화면에서는 툴바가 그만큼 늦게
+          뜨거나 그 사이 컨텍스트가 사라져 주입이 통째로 없어졌다(간헐 증상의 한 갈래)."""
+        t = threading.Timer(delay, lambda: self._jobs.put(fn))
+        t.daemon = True
+        t.start()
+
+    def _inject_if_missing(self, sid, cid, tries=0):
+        """그 문서에 스크립트가 없으면 넣는다. 이미 있으면 설정만 다시 얹는다."""
         if sid not in self.sessions:
             return
+        base = {'returnByValue': True}
+        if cid is not None:
+            base['contextId'] = cid
         try:
             # 표식이 있으면 끝. 없더라도 광고·트래킹용 초소형 프레임에는 546KB 를 넣지 않는다.
-            probe = ('(function(){if(document.__qaDoc)return "have";'
+            # ★'표식이 있다' 와 '살아 있다' 는 다르다. 번들은 표식을 먼저 찍고 본체는
+            #   DOM 준비 뒤에 도는데, 그 사이에 죽으면 표식만 남는다(스타일 없는 툴바가
+            #   이 경우였다). 문서가 이미 준비됐는데 우리 함수가 없으면 죽은 것이다.
+            probe = ('(function(){if(document.__qaDoc){'
+                     'return (document.readyState!=="loading"&&'
+                     'typeof window.__qaSetMode!=="function")?"broken":"have";}'
                      'if(window.top!==window.self&&(innerWidth<200||innerHeight<200))'
                      'return "tiny";return "need";})()')
-            r = self.cdp.call('Runtime.evaluate',
-                              {'expression': probe, 'returnByValue': True,
-                               'contextId': cid}, session_id=sid, timeout=5)
-            if (r.get('result') or {}).get('value') != 'need':
+            r = self.cdp.call('Runtime.evaluate', dict(base, expression=probe),
+                              session_id=sid, timeout=5)
+            v = (r.get('result') or {}).get('value')
+            if v == 'broken' and tries == 0:
+                # 죽은 인스턴스 위에 한 번만 다시 넣는다(반복하면 두 벌이 될 수 있다).
+                self.log('주입이 중간에 죽은 문서를 다시 살립니다.')
+            elif v == 'have' or v == 'broken':
+                # ★두 벌로 만들지 않는다. 브라우저를 열어 둔 채 프로그램만 다시 켜면
+                #   여기로 다시 오는데, 예전에는 그때마다 인스턴스가 통째로 하나 더
+                #   들어갔다(실측: 재접속 뒤 __qaInjected=2 · document.__qaDoc=2).
+                #   설정(툴바 위치·판 번호)만 다시 얹는다.
+                self.cdp.call('Runtime.evaluate', dict(base, expression=self._head()),
+                              session_id=sid, timeout=5)
+                return
+            if v == 'tiny':
+                # ★영영 건너뛰지 않는다. 셸은 iframe 을 작게(또는 0×0 으로) 만들어 두고
+                #   자료가 온 뒤에 키운다 - 그때 다시 보지 않으면 그 문서에는 툴바가
+                #   영원히 뜨지 않는다(= 본문을 고를 수 없다).
+                #   ★간격을 늘려 가며 25초까지 본다. 느린 조회를 기다렸다 커지는 화면이
+                #     있어서 6초로는 짧았다(광고 프레임은 계속 작아서 몇 번 헛보고 끝난다).
+                waits = (1.5, 2.5, 4.0, 7.0, 10.0)
+                if tries < len(waits):
+                    self._later(waits[tries],
+                                lambda: self._inject_if_missing(sid, cid, tries + 1))
                 return
             self.cdp.call('Runtime.evaluate',
-                          {'expression': self.inject_js, 'awaitPromise': False,
-                           'contextId': cid}, session_id=sid, timeout=15)
+                          {'expression': self._source(), 'awaitPromise': False,
+                           'contextId': cid} if cid is not None else
+                          {'expression': self._source(), 'awaitPromise': False},
+                          session_id=sid, timeout=15)
         except WSError:
             pass                            # 컨텍스트가 이미 사라졌다 - 다음 문서에서 처리
 
@@ -485,6 +539,9 @@ class Launcher(object):
         except Exception:
             return
         s = self.sessions.get(sid)
+        if payload.get('kind') == 'mode':
+            self._on_mode(sid, payload.get('output'))
+            return
         if payload.get('kind') == 'page':
             # 주석이 아니라 "이 탭은 지금 이 주소를 이 해상도로 본다" 는 통지
             key = self.store.touch_page(payload)
@@ -493,15 +550,105 @@ class Launcher(object):
                 s.page_key = key
             self._maybe_clear_stale(payload.get('url'))
             return
+        if payload.get('kind') == 'layout':
+            # 브3: 레이아웃 모드에서 옮긴 것. 주석이 아니므로 store.apply 로
+            #   보내지 않는다(빈 annotations 로 들어가면 '주석 이벤트' 로 잘못 남는다).
+            self.store.set_layout(payload)
+            return
+        # 브8: 메모창에 붙인 그림. ★jsonl 에 base64 를 남기지 않는다 - store.apply
+        #   전에 떼어내고 store.add_images() 로 파일로만 저장한다.
+        images = payload.pop('images', None)
         pages, total = self.store.apply(payload)
+        if images:
+            anns = payload.get('annotations') or []
+            aid = anns[0].get('id') if anns else None
+            if aid:
+                added = self.store.add_images(aid, images)
+                if added:
+                    self.log('그림 %d장을 첨부했습니다 - %s' % (len(added), aid))
         if s is not None and payload.get('url'):
             s.page_key = self.store.key_of(payload.get('url'), payload.get('viewport'))
         self.log('주석 %s - 화면 %d개 · 주석 %d건' % (payload.get('kind'), pages, total))
+
+    # ── 주석 모드를 같은 탭의 모든 문서에 맞춘다 ───────────────
+    def _root_sid(self, sid):
+        """이 세션이 속한 탭(최상위 page 세션)."""
+        seen = set()
+        while sid and sid in self.sessions:
+            if sid in seen:
+                break
+            seen.add(sid)
+            parent = self.sessions[sid].parent
+            if not parent or parent not in self.sessions:
+                break
+            sid = parent
+        return sid
+
+    def _on_mode(self, sid, want):
+        """화면에서 온 통지. 'ask' 는 갓 붙은 문서가 '이 탭이 지금 어떤가' 를 묻는 것."""
+        root = self._root_sid(sid)
+        if want == 'ask':
+            hit = self._tab_mode.get(root)
+            if hit and hit[0]:
+                self._broadcast_mode(root, True)
+            return
+        if want in ('sync-on', 'sync-off'):
+            # ★주기 보고. 탭이 기억하는 값과 다르면 그 값으로 되돌린다(어긋남 자동 교정).
+            #   여기서 프레임의 값을 채택하지 않는다 - 기준은 사람이 마지막으로 정한 값이다.
+            hit = self._tab_mode.get(root)
+            if hit is not None and hit[0] != (want == 'sync-on'):
+                self._broadcast_mode(root, hit[0])
+            return
+        on = (want == 'on')
+        top = self.sessions.get(root)
+        # 어느 주소에서 켠 모드인지 함께 적어 둔다(아래 _on_navigated 가 쓴다).
+        self._tab_mode[root] = (on, (top.url if top else '') or '')
+        self._broadcast_mode(root, on)
+
+    def _broadcast_mode(self, root, on):
+        """★이것이 "gnb·lnb 만 클릭된다" 의 고침이다.
+
+        셸 구조에서 상단바·좌측 메뉴(최상위 문서)와 본문(iframe)은 서로 다른 문서라
+        툴바가 둘이고, 교차출처면 서로를 JS 로 부를 수 없어 모드가 따로 논다.
+        Esc 를 받은 쪽만 켜지므로, 그때 포커스가 어디 있었느냐에 따라 gnb·lnb 만
+        잡히거나 본문만 잡혔다(재현: 셸+교차출처 iframe - 최상위 mode=on,
+        iframe mode=off, 본문을 더블클릭해도 메모창이 열리지 않았다).
+        교차출처를 넘는 다리는 우리(CDP)뿐이라 프로그램이 전달한다.
+
+        ★같은 탭에만 보낸다. 보고 있지 않은 탭까지 주석 모드가 되면 그 탭은 클릭을
+          받지 못한다(모드가 켜진 동안 페이지 클릭을 막는 것이 이 도구의 정책이다).
+        ★응답을 기다리지 않는다(wait=False). 이 함수는 CDP 수신 스레드에서 불리므로
+          여기서 기다리면 수신이 멈춘다."""
+        expr = ('(function(){try{return typeof window.__qaSetMode==="function"'
+                '?window.__qaSetMode(%s):null;}catch(e){return null;}})()'
+                % ('true' if on else 'false'))
+        for s in list(self.sessions.values()):
+            if s.type not in ('page', 'iframe'):
+                continue
+            if self._root_sid(s.sid) != root:
+                continue
+            for ctx in (list(s.contexts.values()) or [None]):
+                params = {'expression': expr}
+                if ctx is not None:
+                    params['contextId'] = ctx
+                try:
+                    self.cdp.call('Runtime.evaluate', params, session_id=s.sid, wait=False)
+                except Exception:
+                    continue
 
     def _on_navigated(self, params, sid):
         frame = params.get('frame') or {}
         if frame.get('parentId'):
             return                              # 최상위 문서만 화면으로 센다
+        # ★'다른 화면으로 옮겼으면' 그 탭의 주석 모드 기억을 버린다. 모드가 켜진 동안
+        #   페이지는 클릭을 받지 못하므로, 새 화면이 켜진 채로 뜨면 '먹통' 으로 보인다.
+        #   ★단 같은 주소로 다시 부른 것(새로고침)은 버리지 않는다. 세션 유지 때문에
+        #     스스로 주기적으로 새로고침하는 셸이 있어서, 버리면 QA 중에 모드가 자꾸
+        #     혼자 꺼진다(실측: 11초마다 새로고침하는 셸에서 그 뒤로 계속 꺼진 채였다).
+        root = self._root_sid(sid)
+        hit = self._tab_mode.get(root)
+        if hit and hit[1] != (frame.get('url') or ''):
+            self._tab_mode.pop(root, None)
         s = self.sessions.get(sid)
         if s:
             s.url = frame.get('url') or ''
@@ -699,7 +846,7 @@ class Launcher(object):
                     continue
         return total
 
-    def paste_into(self, url, text):
+    def paste_into(self, url, text, files=None):
         """이슈 화면을 열고 댓글 편집기에 내용을 채워 넣는다. 등록은 사람이 한다(프6·7).
 
         ★API 토큰을 쓰지 않는다. 우리가 띄운 브라우저에 사람이 이미 로그인해 두었으므로
@@ -708,9 +855,15 @@ class Launcher(object):
         ★못 채워도 실패가 아니다. 클립보드에 담아 두고 "붙여넣고 등록하세요" 로 안내한다
           (지라 댓글 편집기는 리치 텍스트라 화면마다 다르다 - 자동 채움을 보장하지 않는다).
 
-        돌려주는 값: {'navigated': bool, 'filled': bool, 'kind': 'textarea'|'rich'|None}
+        ★files(브8, 절대경로 목록) 는 아직 실측하지 않았다 - 진짜 지라 화면에서
+          한 번도 확인하지 못했다(README "실측 전에는 된다고 적지 않는다"). 리치
+          편집기에 CDP 로 파일 드롭을 흉내 내 보고, 안 되면 파일 입력을 찾아
+          채우고, 그것도 안 되면 조용히 건너뛴다(글은 그대로 채워진다).
+
+        돌려주는 값: {'navigated': bool, 'filled': bool, 'kind': 'textarea'|'rich'|None,
+                     'images': bool}
         """
-        out = {'navigated': False, 'filled': False, 'kind': None}
+        out = {'navigated': False, 'filled': False, 'kind': None, 'images': False}
         if not (self.cdp and not self.cdp.closed):
             return out
         s = self._wait_page()
@@ -771,7 +924,77 @@ class Launcher(object):
             out['filled'] = bool(n and n > 20)
         except Exception:
             pass
+        if out['filled'] and files:
+            try:
+                out['images'] = self._drop_files(s.sid, hit, files)
+            except Exception:
+                pass
         return out
+
+    def _drop_files(self, sid, hit, files):
+        """브8: 채워 넣은 편집기에 그림 파일을 끌어다 놓는다(실측 전 - 위 docstring 참고).
+
+        1안: 편집기 위로 파일 드래그(dragenter→dragover→drop)를 흉내 낸다 -
+             리치 편집기(지라 등)는 보통 이 경로로 이미지를 첨부로 받는다.
+        2안: 그래도 그림 수가 늘지 않으면 숨은 input[type=file] 을 찾아 채운다.
+        둘 다 실패해도 예외를 던지지 않는다 - 글은 이미 채워졌으니 실패가 아니다."""
+        before = self._media_count(sid)
+        try:
+            self.cdp.call('Input.setInterceptDrags', {'enabled': True},
+                          session_id=sid, timeout=8)
+            data = {'items': [], 'files': list(files), 'dragOperationsMask': 1}
+            for t in ('dragEnter', 'dragOver', 'drop'):
+                self.cdp.call('Input.dispatchDragEvent',
+                              {'type': t, 'x': hit['x'], 'y': hit['y'], 'data': data},
+                              session_id=sid, timeout=8)
+                time.sleep(0.15)
+        except Exception:
+            pass
+        time.sleep(0.8)
+        if self._media_count(sid) > before:
+            return True
+        # 2안: 숨은 파일 입력에 직접 채운다.
+        try:
+            find_input = ("(function(){"
+                          "var els=document.querySelectorAll('input[type=file]');"
+                          "return els.length ? 0 : -1;})()")
+            r = self.cdp.call('Runtime.evaluate',
+                              {'expression': find_input, 'returnByValue': True},
+                              session_id=sid, timeout=8)
+            idx = (r.get('result') or {}).get('value')
+            if idx is None or idx < 0:
+                return False
+            node = self.cdp.call('DOM.getDocument', {'depth': -1, 'pierce': True},
+                                 session_id=sid, timeout=8)
+            root_id = ((node.get('root') or {}).get('nodeId'))
+            found = self.cdp.call('DOM.querySelector',
+                                  {'nodeId': root_id, 'selector': 'input[type=file]'},
+                                  session_id=sid, timeout=8)
+            file_node_id = found.get('nodeId')
+            if not file_node_id:
+                return False
+            self.cdp.call('DOM.setFileInputFiles',
+                          {'files': list(files), 'nodeId': file_node_id},
+                          session_id=sid, timeout=8)
+            time.sleep(0.8)
+            return self._media_count(sid) > before
+        except Exception:
+            return False
+
+    def _media_count(self, sid):
+        """편집기 안 이미지 계열 노드 수 - 드롭 성공 판정에 쓴다."""
+        try:
+            expr = ("(function(){"
+                    "var e=document.activeElement;"
+                    "var root=(e&&e.closest)?(e.closest('[contenteditable],form,body')||document.body)"
+                    ":document.body;"
+                    "return root.querySelectorAll('img,video,[data-testid*=\"media\" i]').length;"
+                    "})()")
+            r = self.cdp.call('Runtime.evaluate', {'expression': expr, 'returnByValue': True},
+                              session_id=sid, timeout=8)
+            return (r.get('result') or {}).get('value') or 0
+        except Exception:
+            return 0
 
     def _type_text(self, sid, text, kind):
         """편집기에 내용을 넣는다.
@@ -826,13 +1049,17 @@ class Launcher(object):
                     continue
         return total
 
-    def _source(self):
-        """주입할 소스. 설정 스위치를 앞에 얹는다(새로 뜨는 문서에 곧바로 적용된다)."""
+    def _head(self):
+        """주입 앞에 얹는 설정 스위치. 이미 주입된 문서에는 이것만 다시 얹는다."""
         head = 'window.__qaForceTop=%s;\n' % ('true' if self.force_top else 'false')
         # 브10: 어느 판으로 띄운 화면인지 툴바에서 바로 읽히게 한다.
         #   ★같은 이름으로 exe 를 덮어써서 "이전에는 됐는데" 를 재현조차 못 한 일이 있었다.
         head += 'window.__qaVer=%s;\n' % json.dumps(self.version)
-        return head + self.inject_js
+        return head
+
+    def _source(self):
+        """주입할 소스 = 설정 스위치 + 번들."""
+        return self._head() + self.inject_js
 
     def set_force_top(self, on):
         """툴바 위치 설정을 지금 떠 있는 문서에도 적용한다(브4).

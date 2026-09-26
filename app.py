@@ -229,7 +229,7 @@ class App(tk.Tk):
         #   고장으로 읽힌다 - 그래서 켤 때만이 아니라 시작할 때마다 적는다.
         self.log('판 %s · 툴바 위치: %s'
                  % (VER.label(),
-                    '최상위 화면 고정' if self.force_top.get() else '자동'))
+                    '둘 다 고르기(상단바·좌측 메뉴 + 본문)' if self.force_top.get() else '자동'))
         pages, total = self.store.replay()
         if total:
             self.log('지난 기록을 복원했습니다 - 화면 %d개 · 주석 %d건' % (pages, total))
@@ -358,8 +358,8 @@ class App(tk.Tk):
         opt = ttk.Frame(wrap)
         opt.pack(fill='x', pady=(0, 4))
         tk.Checkbutton(opt, variable=self.force_top, bg='#ffffff', font=(self.ui_font, 9),
-                       text='툴바를 최상위 화면에 고정  (좌측 메뉴·상단바에도 주석 가능 · '
-                            'iframe 안쪽은 고를 수 없음)',
+                       text='상단바·좌측 메뉴도 함께 고르기  (셸 화면에서 켜세요 · '
+                            '툴바가 둘이 되고 모드는 함께 켜집니다)',
                        command=self.apply_force_top).pack(side='left')
 
         cols = ('no', 'title', 'vp', 'url', 'ann', 'con', 'net')
@@ -370,12 +370,16 @@ class App(tk.Tk):
         self.tree.bind('<Double-1>', self.on_row_open)
         # 프3: 화면 줄에서 그 주소로 브라우저를 보낸다. 프4: 주석 순서를 옮긴다.
         self.tree.bind('<Button-3>', self.on_row_menu)
-        # 프3: '주소' 열을 클릭하면 그 화면으로 보낸다(요구가 "url 을 클릭하면" 이었다).
-        #   다른 열은 평소대로 선택만 한다 - 어디를 눌러도 이동하면 오작동이 된다.
-        self.tree.bind('<Button-1>', self.on_row_click)
+        # 브1: 목록에서 클릭 드래그로 순서를 바꾼다. 프3(주소 클릭 이동)도 같은
+        #   버튼이라 press 에서는 아무것도 하지 않고 release 에서 '드래그가 아니었을
+        #   때만' 이동한다 - 안 그러면 주소 열에서 드래그를 시작할 때마다 화면이 튄다.
+        self.tree.bind('<ButtonPress-1>', self.on_row_press)
+        self.tree.bind('<B1-Motion>', self.on_row_drag)
+        self.tree.bind('<ButtonRelease-1>', self.on_row_release)
         self.tree.bind('<Control-Up>', lambda e: self.move_row(-1))
         self.tree.bind('<Control-Down>', lambda e: self.move_row(1))
         self._tree_sig = None
+        self._drag = None
         self._menu = tk.Menu(self, tearoff=0)
         # 해상도는 화면 정체성의 일부다(같은 주소라도 해상도가 다르면 다른 줄).
         for key, label, width, anchor in (
@@ -536,19 +540,33 @@ class App(tk.Tk):
         return 'p|%s|%s' % (row['url'], row['vp'])
 
     def _fill_tree(self):
+        # 브1: 드래그 중에는 다시 그리지 않는다 - 1초마다 도는 refresh 가 통째로
+        #   지웠다 다시 그리면 끌던 줄의 iid 가 죽어 드래그가 끊긴다.
+        if self._drag and self._drag.get('active'):
+            return
         rows = self.store.tree_rows()
         # ★1초마다 통째로 다시 그리면 펼친 것이 접히고 선택이 풀린다.
         #   내용이 그대로면 손대지 않는다.
         sig = repr([(r['no'], r['title'], r['vp'], r['url'], r['ann'], r['con'], r['net'],
-                     [(a['aid'], a['comment'], a['note'], a['refs']) for a in r['anns']])
-                    for r in rows])
+                     [(a['aid'], a['no'], a['parent'], a['foreign'], a['comment'],
+                       a['note'], a['refs']) for a in r['anns']],
+                     r.get('layout')) for r in rows])
         if sig == self._tree_sig:
             return
         self._tree_sig = sig
+        # ★펼침 상태를 재귀로 모은다 - 브5(하위 접기)로 3단 이상이 되면서, 맨 위
+        #   줄만 보면 하위 주석 줄의 펼침·접힘이 1초마다 초기화된다.
         opened = set()
-        for iid in self.tree.get_children(''):
-            if self.tree.item(iid, 'open'):
-                opened.add(iid)
+
+        def walk(iid):
+            for c in self.tree.get_children(iid):
+                if self.tree.item(c, 'open'):
+                    opened.add(c)
+                walk(c)
+        walk('')
+        existed = set(self.tree.get_children(''))
+        for iid in list(existed):
+            existed.update(self.tree.get_children(iid))
         sel = self.tree.selection()
         for iid in self.tree.get_children(''):
             self.tree.delete(iid)
@@ -557,7 +575,13 @@ class App(tk.Tk):
             self.tree.insert('', 'end', iid=pid, open=(pid in opened),
                              values=(r['no'], r['title'], r['vp'], r['url'],
                                      r['ann'], r['con'], r['net']))
+            # ★anns 는 트리 전위 순서로 온다(store._flatten) - 부모가 자식보다
+            #   먼저 나와서, 자식을 넣을 때 부모 iid 가 이미 있다.
             for a in r['anns']:
+                iid = 'a|%s' % a['aid']
+                parent_iid = ('a|%s' % a['parent']) if a['parent'] else pid
+                if not self.tree.exists(parent_iid):
+                    parent_iid = pid          # 방어: 부모가 아직 안 들어간 경우
                 mark = ''
                 if a.get('priority'):
                     mark += ' [%s]' % PRIORITY_LABEL[a['priority']]
@@ -566,16 +590,27 @@ class App(tk.Tk):
                 if a['note']:
                     mark += ' ✎'                    # 보충 메모가 있다
                 if a['refs']:
-                    mark += ' ↔%d' % a['refs']      # 연결이 있다
+                    mark += ' ⤷%d' % a['refs']      # 하위 주석이 있다
                 memo = (a['comment'] or '(메모 없음)').replace('\n', ' ')
                 if len(memo) > 90:
                     memo = memo[:90] + '…'
+                title = a['element']
+                if a.get('foreign'):
+                    # 다른 화면의 하위 주석이다 - 원래 어느 화면 것인지 밝힌다.
+                    title = '[화면 %d] %s' % (a['home_screen'], title)
                 # ★메모는 넓은 '주소' 열에 싣는다. 제목 열에 다 넣으면 잘려서 정작
-                #   표식([높음]·→기대·✎·↔N)이 안 보인다(캡처로 확인했다).
-                self.tree.insert(pid, 'end', iid='a|%s' % a['aid'],
-                                 values=('%d.' % a['no'],
-                                         '%s%s' % (a['element'], mark),
+                #   표식([높음]·→기대·✎·⤷N)이 안 보인다(캡처로 확인했다).
+                # 새로 생긴 하위 줄은 기본으로 펼쳐 보여 준다(방금 연결한 것을
+                # 곧바로 접어 숨기지 않는다) - 이미 있던 줄은 상태를 그대로 지킨다.
+                self.tree.insert(parent_iid, 'end', iid=iid,
+                                 open=(iid in opened or iid not in existed),
+                                 values=('%s.' % a['no'], '%s%s' % (title, mark),
                                          '', memo, '', '', ''))
+            for j, lay in enumerate(r.get('layout') or []):
+                lid = 'l|%d|%s' % (j, pid)
+                self.tree.insert(pid, 'end', iid=lid,
+                                 values=('⇄', lay.get('label') or '레이아웃 변경',
+                                         '', lay.get('detail') or '', '', '', ''))
         for iid in sel:
             if self.tree.exists(iid):
                 self.tree.selection_add(iid)
@@ -585,6 +620,8 @@ class App(tk.Tk):
         if not sel:
             return
         iid = sel[0]
+        if iid.startswith('l|'):
+            return                         # 레이아웃 줄은 보강 창이 없다
         if not iid.startswith('a|'):
             # 화면 줄이면 펼치기/접기만 한다.
             self.tree.item(iid, open=not self.tree.item(iid, 'open'))
@@ -615,6 +652,14 @@ class App(tk.Tk):
             self._menu.add_separator()
             self._menu.add_command(label='화면 위로 (Ctrl+↑)', command=lambda: self.move_row(-1))
             self._menu.add_command(label='화면 아래로 (Ctrl+↓)', command=lambda: self.move_row(1))
+        elif iid.startswith('l|'):
+            # 레이아웃 변경 줄 - 보강 창·순서 대상이 아니다. 그 화면으로 이동만.
+            key = self._row_key(self.tree.parent(iid))
+            url = key[0] if key else ''
+            self._menu.add_command(label='이 화면으로 이동',
+                                   command=lambda u=url: self.goto_url(u))
+            self._menu.add_command(label='주소 복사',
+                                   command=lambda u=url: self.copy_text(u))
         else:
             aid = iid[2:]
             self._menu.add_command(label='보강 창 열기',
@@ -645,14 +690,92 @@ class App(tk.Tk):
         if set_clipboard(text or ''):
             self.log('클립보드로 복사 - %s' % (text or '')[:80])
 
-    def on_row_click(self, event):
-        """프3: 주소 열을 클릭하면 그 화면으로 이동한다."""
-        if self.tree.identify_region(event.x, event.y) != 'cell':
-            return
-        if self.tree.identify_column(event.x) != '#4':      # 4번째 열 = 주소
-            return
+    @staticmethod
+    def _save_clipboard_image(dest_path):
+        """브8: 클립보드의 그림을 PNG 로 저장한다(보강 창의 '클립보드에서 붙이기').
+
+        ★PIL 없이 PowerShell 한 줄로 한다 - 배포 PC 에는 파이썬이 없다(README
+          "다른 PC 전제"). Windows Forms 클립보드 API 는 표준 PowerShell 에 있다."""
+        if os.name != 'nt':
+            return False
+        ps = (u"Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
+              u"$img = [System.Windows.Forms.Clipboard]::GetImage();"
+              u"if ($img -eq $null) { exit 1 };"
+              u"$img.Save('%s', [System.Drawing.Imaging.ImageFormat]::Png)"
+              % dest_path.replace("'", "''"))
+        try:
+            creation = 0x08000000                     # CREATE_NO_WINDOW
+            r = subprocess.run(['powershell', '-NoProfile', '-Command', ps],
+                               capture_output=True, timeout=10, creationflags=creation)
+            return r.returncode == 0 and os.path.exists(dest_path)
+        except Exception:
+            return False
+
+    def on_row_press(self, event):
+        """브1 드래그의 시작점만 기억한다. 여기서는 아무것도 옮기지 않는다 -
+        눌렀다 그대로 뗄 수도 있고(선택·주소 이동), 끌 수도 있다(순서 변경)."""
+        region = self.tree.identify_region(event.x, event.y)
         iid = self.tree.identify_row(event.y)
-        key = self._row_key(iid) if iid else None
+        self._drag = None
+        if not iid or iid.startswith('l|'):        # 레이아웃 줄은 옮기지 않는다
+            return
+        if region == 'tree':                       # 펼침 화살표 - 원래 동작에 맡긴다
+            return
+        self._drag = {
+            'iid': iid, 'x': event.x, 'y': event.y,
+            'col': self.tree.identify_column(event.x), 'region': region,
+            'parent': self.tree.parent(iid), 'active': False,
+        }
+
+    def on_row_drag(self, event):
+        """브1: 4px 넘게 움직이면 드래그로 본다. 형제(같은 부모·같은 종류) 사이에서만
+        옮긴다 - 화면 줄이 주석 줄 밑으로, 주석이 다른 화면 밑으로 새지 않게."""
+        d = self._drag
+        if not d:
+            return
+        if not d['active']:
+            if abs(event.x - d['x']) < 4 and abs(event.y - d['y']) < 4:
+                return
+            d['active'] = True
+            self.tree.selection_set(d['iid'])
+        target = self.tree.identify_row(event.y)
+        if not target or target == d['iid']:
+            return 'break'
+        if self.tree.parent(target) != d['parent']:
+            return 'break'                          # 다른 그룹으로는 넘기지 않는다
+        if target[:2] != d['iid'][:2]:               # 'p|' 끼리, 'a|' 끼리만
+            return 'break'
+        self.tree.move(d['iid'], d['parent'], self.tree.index(target))
+        return 'break'
+
+    def on_row_release(self, event):
+        """드래그였으면 최종 순서를 저장한다. 아니었으면(그냥 클릭) 프3 을 그대로 한다 -
+        주소 열 클릭 이동은 여기서 처리해야 드래그 시작이 이동으로 새지 않는다."""
+        d = self._drag
+        self._drag = None
+        if not d:
+            return
+        if d['active']:
+            iid = d['iid']
+            if iid.startswith('p|'):
+                keys = [self._row_key(c) for c in self.tree.get_children('')]
+                self.store.reorder_pages(keys)
+                self.log('화면 순서를 옮겼습니다 - 결과 문서의 화면 번호도 함께 바뀝니다.')
+            elif iid.startswith('a|'):
+                ids = [c[2:] for c in self.tree.get_children(d['parent'])
+                       if c.startswith('a|')]
+                if self._persist_sibling_order(d['parent'], ids):
+                    self.log('주석 순서를 옮겼습니다.')
+            self._tree_sig = None
+            self._fill_tree()
+            if self.tree.exists(iid):
+                self.tree.selection_set(iid)
+                self.tree.see(iid)
+            return
+        # 드래그가 아니었다 - 프3: '주소' 열을 클릭하면 그 화면으로 이동한다.
+        if d['region'] != 'cell' or d['col'] != '#4':      # 4번째 열 = 주소
+            return
+        key = self._row_key(d['iid'])
         if key and key[0]:
             self.goto_url(key[0])
 
@@ -674,12 +797,21 @@ class App(tk.Tk):
             return
         if not sel[0].startswith('a|'):
             return
+        # 브5: 주석은 이제 중첩될 수 있다 - '형제' 는 화면 밑이 아니라 같은 부모
+        #   (화면 또는 상위 주석) 밑의 것들이다. 트리가 이미 그 모양을 들고 있으므로
+        #   거기서 형제 목록을 얻어 델타만큼 옮기고 그대로 저장한다.
         iid = sel[0]
-        aid = iid[2:]
-        key = self._row_key(self.tree.parent(iid))
-        if not key:
+        parent_iid = self.tree.parent(iid)
+        sibs = [c for c in self.tree.get_children(parent_iid) if c.startswith('a|')]
+        if iid not in sibs:
             return
-        if self.store.move_annotation(key, aid, delta) is None:
+        i = sibs.index(iid)
+        j = max(0, min(len(sibs) - 1, i + delta))
+        if i == j:
+            return
+        sibs.insert(j, sibs.pop(i))
+        ids = [c[2:] for c in sibs]
+        if not self._persist_sibling_order(parent_iid, ids):
             return
         self._tree_sig = None
         self._fill_tree()
@@ -688,6 +820,20 @@ class App(tk.Tk):
             self.tree.see(iid)
         self.log('주석 순서를 옮겼습니다.')
 
+    def _persist_sibling_order(self, parent_iid, ids):
+        """형제 주석의 최종 순서를 저장한다. 부모가 화면이면 화면 안 순서
+        (set_order), 부모가 다른 주석이면 그 밑 하위 순서(set_child_order)다."""
+        if parent_iid.startswith('p|'):
+            key = self._row_key(parent_iid)
+            if not key:
+                return False
+            self.store.set_order(key, ids)
+            return True
+        if parent_iid.startswith('a|'):
+            self.store.set_child_order(parent_iid[2:], ids)
+            return True
+        return False
+
     def apply_force_top(self):
         """툴바 위치 설정을 지금 떠 있는 브라우저에도 바로 적용한다(브4)."""
         on = bool(self.force_top.get())
@@ -695,7 +841,7 @@ class App(tk.Tk):
         self.save_settings()
         if not (self.launcher and self.launcher.alive() and self.launcher.cdp):
             self.log('툴바 위치: %s (브라우저를 열면 적용됩니다)'
-                     % ('최상위 화면 고정' if on else '자동'))
+                     % ('둘 다 고르기' if on else '자동'))
             return
         try:
             n = self.launcher.set_force_top(on)
@@ -703,8 +849,8 @@ class App(tk.Tk):
             self.log('툴바 위치 적용 실패: %s' % e)
             return
         self.log('툴바 위치: %s · 문서 %d곳에 적용%s'
-                 % ('최상위 화면 고정' if on else '자동', n,
-                    ' (좌측 메뉴·상단바도 주석 가능 · iframe 안쪽은 고를 수 없습니다)'
+                 % ('둘 다 고르기' if on else '자동', n,
+                    ' (상단바·좌측 메뉴는 위쪽 툴바, 본문은 아래쪽 툴바 - 모드는 함께 켜집니다)'
                     if on else ''))
 
     def do_undo(self):
@@ -767,14 +913,14 @@ class App(tk.Tk):
         f = self.ui_font
 
         win = tk.Toplevel(self)
-        win.title('주석 보강 — [화면 %d] %d번' % (info['screen'], info['no']))
+        win.title('주석 보강 — [화면 %d] %s번' % (info['screen'], info['no']))
         win.configure(bg='#ffffff')
         win.transient(self)
-        win.geometry('620x720')
+        win.geometry('620x860')
         pad = {'padx': 16}
 
         tk.Label(win, bg='#ffffff', font=(f, 11, 'bold'), anchor='w',
-                 text='[화면 %d] %d번  %s' % (info['screen'], info['no'], info['element'])
+                 text='[화면 %d] %s번  %s' % (info['screen'], info['no'], info['element'])
                  ).pack(fill='x', pady=(14, 2), **pad)
         tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
                  text='%s  (%s)' % (info['title'], info['vp'])).pack(fill='x', **pad)
@@ -816,10 +962,13 @@ class App(tk.Tk):
         note.insert('1.0', meta['note'])
         note.pack(fill='x', **pad)
 
+        # 브4·5: 연결 = 하위 주석. 고른 것은 결과 문서에 이 주석의 1.1 · 1.2 로
+        #   들어간다(다른 화면 것이어도 화면을 밝히고 들어간다).
         tk.Label(win, bg='#ffffff', font=(f, 10, 'bold'), anchor='w',
-                 text='관련 주석 (원인이 다른 화면에 있을 때)').pack(fill='x', pady=(14, 2), **pad)
+                 text='하위 주석 (이 주석 아래에 묶을 것)').pack(fill='x', pady=(14, 2), **pad)
         tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
-                 text='연결하면 양쪽 결과에 서로를 가리키는 줄이 함께 들어갑니다.'
+                 text='고른 주석은 결과 문서에 이 주석의 1.1 · 1.2 … 로 들어갑니다. 다른 화면의\n'
+                      '주석이어도 됩니다. 하위 주석은 상위를 하나만 가질 수 있습니다.'
                  ).pack(fill='x', **pad)
         box = tk.Frame(win, bg='#ffffff')
         box.pack(fill='both', expand=True, pady=(2, 0), **pad)
@@ -830,11 +979,24 @@ class App(tk.Tk):
         side.pack(side='right', fill='y', padx=(8, 0))
 
         refs = list(meta['refs'])
+        all_list = self.store.all_annotations()
         label_of = {}
-        for x in self.store.all_annotations():
+        for x in all_list:
             memo = (x['comment'] or '')[:34]
-            label_of[x['aid']] = '[화면 %d] %d번 %s%s' % (
+            label_of[x['aid']] = '[화면 %d] %s번 %s%s' % (
                 x['screen'], x['no'], x['element'], ' — "%s"' % memo if memo else '')
+        # ★이미 상위가 있는 주석과, 이 주석의 조상은 후보에서 뺀다 - 상위를 둘
+        #   가질 수 없고, 조상을 하위로 붙이면 순환이 된다(store 가 막긴 하지만
+        #   고르는 시점에 미리 보여야 사람이 헷갈리지 않는다).
+        parent_of = {x['aid']: x['parent'] for x in all_list}
+
+        def ancestors_of(a):
+            seen, cur = set(), parent_of.get(a)
+            while cur and cur not in seen:
+                seen.add(cur)
+                cur = parent_of.get(cur)
+            return seen
+        blocked = ancestors_of(aid)
 
         def redraw():
             lst.delete(0, 'end')
@@ -843,32 +1005,34 @@ class App(tk.Tk):
 
         def add_ref():
             pick = tk.Toplevel(win)
-            pick.title('연결할 주석 고르기')
+            pick.title('하위로 넣을 주석 고르기')
             pick.configure(bg='#ffffff')
             pick.transient(win)
             pick.geometry('640x420')
             tk.Label(pick, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
-                     text='이 주석의 원인이 되는(또는 관련된) 주석을 고릅니다.'
+                     text='이 주석 아래에 묶을 주석을 고릅니다. 여러 개를 한 번에 고르려면\n'
+                          'Ctrl(또는 Shift)을 누른 채 클릭하세요.'
                      ).pack(fill='x', padx=14, pady=(12, 4))
-            pl = tk.Listbox(pick, font=(f, 10), relief='solid', bd=1, exportselection=False)
+            pl = tk.Listbox(pick, font=(f, 10), relief='solid', bd=1,
+                            selectmode='extended', exportselection=False)
             pl.pack(fill='both', expand=True, padx=14)
-            cand = [x for x in self.store.all_annotations()
-                    if x['aid'] != aid and x['aid'] not in refs]
+            cand = [x for x in all_list if x['aid'] != aid and x['aid'] not in refs
+                    and x['parent'] is None and x['aid'] not in blocked]
             for x in cand:
                 pl.insert('end', label_of[x['aid']])
             if not cand:
-                pl.insert('end', '(연결할 다른 주석이 없습니다)')
+                pl.insert('end', '(하위로 넣을 수 있는 주석이 없습니다)')
 
             def take():
-                i = pl.curselection()
-                if i and cand:
-                    refs.append(cand[i[0]]['aid'])
-                    redraw()
+                for i in pl.curselection():
+                    if cand and cand[i]['aid'] not in refs:
+                        refs.append(cand[i]['aid'])
+                redraw()
                 pick.destroy()
             bar = tk.Frame(pick, bg='#ffffff')
             bar.pack(fill='x', padx=14, pady=12)
             ttk.Button(bar, text='취소', command=pick.destroy).pack(side='right')
-            ttk.Button(bar, text='연결', command=take).pack(side='right', padx=(0, 8))
+            ttk.Button(bar, text='하위로 넣기', command=take).pack(side='right', padx=(0, 8))
             pl.bind('<Double-1>', lambda e: take())
 
         def del_ref():
@@ -877,15 +1041,88 @@ class App(tk.Tk):
                 refs.pop(i[0])
                 redraw()
 
-        ttk.Button(side, text='연결 추가', command=add_ref).pack(fill='x')
-        ttk.Button(side, text='연결 제거', command=del_ref).pack(fill='x', pady=(6, 0))
+        ttk.Button(side, text='하위 추가', command=add_ref).pack(fill='x')
+        ttk.Button(side, text='하위 제거', command=del_ref).pack(fill='x', pady=(6, 0))
         redraw()
+
+        # ── 브8: 첨부 그림 ──
+        # ★도구가 스크린샷을 찍지 않는다(README) - 여기서는 사람이 이미 고른(또는
+        #   메모창에 붙인) 그림을 관리만 한다. 화면에서 붙인 것이 먼저 와 있다.
+        tk.Label(win, bg='#ffffff', font=(f, 10, 'bold'), anchor='w',
+                 text='첨부 그림').pack(fill='x', pady=(14, 2), **pad)
+        tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
+                 text='화면의 메모창에 Ctrl+V(또는 끌어다 놓기)로 붙인 그림이 여기 쌓입니다.\n'
+                      '여기서 파일을 더 붙이거나 뺄 수도 있습니다. 클립보드 복사에는 그림이\n'
+                      '따라가지 않습니다 - 추출(파일 저장) 또는 이슈에 올리기로만 전달됩니다.'
+                 ).pack(fill='x', **pad)
+        abox = tk.Frame(win, bg='#ffffff')
+        abox.pack(fill='x', pady=(2, 0), **pad)
+        alist = tk.Listbox(abox, font=(f, 10), height=3, relief='solid', bd=1,
+                           activestyle='none', exportselection=False)
+        alist.pack(side='left', fill='both', expand=True)
+        aside = tk.Frame(abox, bg='#ffffff')
+        aside.pack(side='right', fill='y', padx=(8, 0))
+
+        def redraw_attach():
+            alist.delete(0, 'end')
+            for fn in self.store.get_attachments(aid):
+                alist.insert('end', fn)
+
+        def attach_file():
+            path = filedialog.askopenfilename(
+                title='붙일 그림 고르기',
+                filetypes=[('그림', '*.png *.jpg *.jpeg *.gif *.webp'), ('모든 파일', '*.*')])
+            if not path:
+                return
+            try:
+                self.store.add_attachment_file(aid, path)
+                redraw_attach()
+                self._tree_sig = None
+            except Exception as e:
+                messagebox.showerror('첨부 실패', str(e), parent=win)
+
+        def attach_clipboard():
+            tmp = os.path.join(self.store.out_dir, '.clip-%s.png' % aid)
+            if not self._save_clipboard_image(tmp):
+                messagebox.showinfo('그림 없음',
+                                    '클립보드에 그림이 없습니다. 먼저 화면을 캡처해 복사하세요.',
+                                    parent=win)
+                return
+            try:
+                self.store.add_attachment_file(aid, tmp)
+                redraw_attach()
+                self._tree_sig = None
+            finally:
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+
+        def open_attach():
+            sel = alist.curselection()
+            if not sel:
+                return
+            self.open_path(os.path.join(self.store.attach_dir, alist.get(sel[0])))
+
+        def remove_attach():
+            sel = alist.curselection()
+            if not sel:
+                return
+            self.store.remove_attachment(aid, alist.get(sel[0]))
+            redraw_attach()
+            self._tree_sig = None
+
+        ttk.Button(aside, text='파일 추가', command=attach_file).pack(fill='x')
+        ttk.Button(aside, text='클립보드에서 붙이기', command=attach_clipboard).pack(fill='x', pady=(6, 0))
+        ttk.Button(aside, text='열기', command=open_attach).pack(fill='x', pady=(6, 0))
+        ttk.Button(aside, text='빼기', command=remove_attach).pack(fill='x', pady=(6, 0))
+        redraw_attach()
 
         def save():
             self.store.set_meta(aid, note.get('1.0', 'end').strip(), refs,
                                 expected.get('1.0', 'end').strip(), prio.get())
             self._tree_sig = None               # 다음 갱신에서 다시 그리게 한다
-            self.log('주석 보강 저장 - [화면 %d] %d번 (연결 %d건%s%s)'
+            self.log('주석 보강 저장 - [화면 %d] %s번 (하위 %d건%s%s)'
                      % (info['screen'], info['no'], len(refs),
                         ' · 기대' if expected.get('1.0', 'end').strip() else '',
                         ' · %s' % PRIORITY_LABEL[prio.get()] if prio.get() else ''))
@@ -985,6 +1222,10 @@ class App(tk.Tk):
             out['text'] = txt.get('1.0', 'end-1c')
             win.destroy()
 
+        # 브8: 첨부 그림이 있으면 이슈에 올릴 때 함께 보낼지 고를 수 있다.
+        n_img = self.store.count_attachments()
+        with_images = tk.BooleanVar(value=True)
+
         def to_issue():
             """이슈 화면을 열고 댓글칸을 채운다. ★등록은 사람이 누른다.
 
@@ -1009,13 +1250,22 @@ class App(tk.Tk):
                     '내용을 클립보드에 담았습니다.\n'
                     '[QA 시작] 으로 브라우저를 열고 이슈 화면에서 붙여넣으세요.', parent=win)
                 return
-            res = self.launcher.paste_into(url, body)
+            files = ([p for _aid, p in self.store.all_attachment_paths()]
+                     if (n_img and with_images.get()) else None)
+            res = self.launcher.paste_into(url, body, files=files)
             if res.get('filled'):
+                img_msg = ''
+                if files:
+                    img_msg = ('\n\n그림 %d장을 댓글에 넣었습니다.' % len(files)
+                               if res.get('images') else
+                               '\n\n그림은 자동으로 못 넣었습니다 - 첨부 폴더에서 직접 올려 주세요.')
+                    if not res.get('images'):
+                        self.open_path(self.store.attach_dir)
                 self.log('이슈 화면을 열고 댓글칸을 채웠습니다 - 확인한 뒤 [등록] 을 누르세요.')
                 messagebox.showinfo(
                     '채워 넣었습니다',
                     '브라우저에서 내용을 확인한 뒤 직접 [등록] 을 누르세요.\n\n'
-                    '자동으로 등록하지 않습니다.', parent=win)
+                    '자동으로 등록하지 않습니다.' + img_msg, parent=win)
             elif res.get('navigated'):
                 self.log('이슈 화면을 열었습니다. 댓글칸에 붙여넣어 주세요(클립보드에 담아 두었습니다).')
                 messagebox.showinfo(
@@ -1037,6 +1287,9 @@ class App(tk.Tk):
                    command=confirm).pack(side='right', padx=(0, 8))
         ttk.Button(bar, text='이슈에 올리기 (등록은 직접)',
                    command=to_issue).pack(side='right', padx=(0, 8))
+        if n_img:
+            tk.Checkbutton(bar, variable=with_images, bg='#ffffff', font=(f, 9),
+                           text='그림 %d장도 함께 올리기' % n_img).pack(side='right', padx=(0, 8))
         txt.focus_set()
         self.wait_window(win)
         return out['text']
@@ -1066,7 +1319,7 @@ class App(tk.Tk):
                             '화면 %d개 · 주석 %d건을 클립보드에 담았습니다.\n'
                             '메일·메신저·이슈에 그대로 붙여넣으세요.' % (pages, total))
 
-    def next_export_name(self):
+    def next_export_name(self, ext='.md'):
         """추출 파일 이름 - 날짜·시각에 회차를 붙인다.
 
         ★같은 이름으로 덮어쓰면 "어느 것이 최신인가" 를 파일 이름만으로 가릴 수 없다.
@@ -1074,7 +1327,7 @@ class App(tk.Tk):
           도구 판 번호는 파일 이름이 아니라 문서 머리에 적는다 - 받는 사람이 읽을
           자리는 문서 안이고, 이름에 번호가 둘이면 그게 더 헷갈린다."""
         seq = int(self.settings.get('export_seq') or 0) + 1
-        return '화면주석_%s_%03d.md' % (datetime.now().strftime('%Y%m%d-%H%M'), seq)
+        return '화면주석_%s_%03d%s' % (datetime.now().strftime('%Y%m%d-%H%M'), seq, ext)
 
     def do_export(self):
         pages, total = self.store.counts()
@@ -1084,10 +1337,16 @@ class App(tk.Tk):
         text = self.preview_text('저장 전 확인', '저장')
         if text is None:
             return
-        default = self.next_export_name()
+        # 브8: 첨부 그림이 있으면 파일 하나(zip)로 묶는다 - 문서와 그림이 따로면
+        #   폴더째 넘기지 않는 한 그림이 빠진다.
+        has_img = self.store.has_attachments()
+        ext = '.zip' if has_img else '.md'
+        filetypes = ([('압축 파일(그림 포함)', '*.zip'), ('모든 파일', '*.*')] if has_img
+                     else [('마크다운', '*.md'), ('모든 파일', '*.*')])
+        default = self.next_export_name(ext)
         path = filedialog.asksaveasfilename(
             title='어디에 저장할까요?', initialfile=default,
-            defaultextension='.md', filetypes=[('마크다운', '*.md'), ('모든 파일', '*.*')])
+            defaultextension=ext, filetypes=filetypes)
         if not path:
             return
         try:
@@ -1101,8 +1360,9 @@ class App(tk.Tk):
         self.save_settings()
         self._tree_sig = None
         n = self.clear_browser_side()
-        self.log('추출 완료 - %s (화면 %d개 · 주석 %d건). 목록을 비웠습니다%s.'
-                 % (path, pages, total, ' · 브라우저 이력 %d건도 비움' % n if n else ''))
+        self.log('추출 완료 - %s (화면 %d개 · 주석 %d건%s). 목록을 비웠습니다%s.'
+                 % (path, pages, total, ' · 그림 포함(zip)' if has_img else '',
+                    ' · 브라우저 이력 %d건도 비움' % n if n else ''))
         messagebox.showinfo('저장했습니다', path)
 
     def do_reset(self):

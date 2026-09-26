@@ -28,6 +28,13 @@ NOISE_CAP = 50          # 화면당 콘솔 에러·실패 요청 보관 상한(�
 API_CAP = 20            # 화면당 '작은 응답' 보관 상한. 실패 기록과 별도 목록이어야 한다
                         #   - 한 목록에 담으면 성공 기록이 실패 기록을 밀어내 버린다
 
+# 연결(meta.refs)의 의미: A → refs 의 C 는 A 의 '하위 주석'이 된다(실사용 요구 4·5).
+# ★참(기본값): 하위가 다른 화면 것이어도 상위 밑에 1.1 로 들어간다(연결의 목적이
+#   "원인이 다른 화면에 있다" 를 표현하는 것이므로 화면을 가리지 않는다).
+#   거짓으로 두면 같은 화면끼리만 묶이고, 다른 화면 것은 지금처럼 '- 관련:' 줄로 남는다.
+#   이 상수 하나만 바꾸면 되도록 _nested() 안 한 곳에서만 참조한다.
+CROSS_SCREEN_CHILDREN = True
+
 
 def _now():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -296,8 +303,12 @@ class Store(object):
             os.makedirs(out_dir)
         self.md_path = os.path.join(out_dir, 'latest.md')
         self.jsonl_path = os.path.join(out_dir, 'annotations.jsonl')
+        self.attach_dir = os.path.join(out_dir, 'attach')   # 사람이 붙인 그림(브8)
         self.lock = threading.RLock()
         self.pages = OrderedDict()      # url -> page dict
+        # aid -> [attach_dir 안 파일 이름…]. 그림 본문은 jsonl 에 남기지 않는다
+        # (base64 를 기록에 넣으면 파일이 순식간에 커진다) - 파일로만 둔다.
+        self.attach = {}
         # ★프로그램이 소유하는 메타. 주석 객체 '안'에 넣지 않는다 -
         #   apply() 는 브라우저가 보낸 주석 dict 를 id 로 통째 덮어쓰므로,
         #   사용자가 브라우저에서 메모를 한 번 고치면 우리가 넣은 필드가 날아간다.
@@ -308,6 +319,10 @@ class Store(object):
         self.skip = set()
         # 사람이 정한 주석 순서. key -> [aid…] (없으면 들어온 순서)
         self.order = {}
+        # 하위 주석끼리의 순서. 부모 aid -> [자식 aid…] (없으면 연결한 순서)
+        #   ★화면(key) 이 아니라 부모 aid 로 둔다 - 하위는 다른 화면 것일 수 있어서
+        #     화면 하나의 순서표로는 표현할 수 없다.
+        self.child_order = {}
         self._replaying = False
         self._spots = None      # 지난 회차 자리 색인. 첫 렌더 때 한 번만 읽는다.
         # 해상도를 알기 전('?') 키에서 실제 키로 옮겨 간 자취.
@@ -338,8 +353,108 @@ class Store(object):
                 out.append((aid, a))
         return out
 
+    def _nested(self, pages):
+        """meta.refs 를 '하위 주석' 으로 엮는다(실사용 요구 4·5 - 연결 = 하위).
+
+        tree_rows·all_annotations·_render_index·render(→_render_annotations) 다섯
+        곳이 전부 같은 트리를 봐야 목록의 번호(1.1)와 결과 문서의 번호가 어긋나지
+        않는다 - README 의 "번호는 렌더 시점에 해석한다" 원칙과 같은 이유다.
+        그래서 이 계산은 여기 한 곳에서만 한다.
+
+        반환: (roots_by_page, index, loose)
+          roots_by_page[i]  pages[i] 의 최상위 주석 노드 목록(그 화면 순서)
+          index             aid -> 노드
+          loose             부모 aid -> [하위가 되지 못한 aid…]
+                            (이미 다른 부모가 있음 · 순환이 됨 · 지워진 대상)
+                            → 렌더에서 '- 하위: →' 로, 반대쪽은 '- 상위: ←' 로 남는다.
+
+        노드 = {aid, ann, key(원 화면 키), home(원 화면 번호, 1-based),
+                screen(지금 표시되는 화면 번호), label('1.2'), depth,
+                parent(aid|None), children([노드…]), foreign(원 화면과 다른 화면
+                밑에 표시되는가)}."""
+        raw, home, ann_of = {}, {}, {}
+        for i, p in enumerate(pages, 1):
+            key = self.key_of(p['url'], p['viewport'])
+            ids = [aid for aid, _ in self._ordered(key, p['annotations'])]
+            raw[key] = ids
+            for aid in ids:
+                home[aid] = (i, key)
+                ann_of[aid] = p['annotations'][aid]
+
+        parent, loose = {}, {}
+
+        def chain_has(start, target):
+            # start 의 부모 사슬을 타고 올라가며 target 을 만나는가 - A 를 C 의
+            # 자식으로 붙이려 할 때(parent[C]=A), C 가 이미 A 의 조상이면 순환이다.
+            cur, seen = parent.get(start), set()
+            while cur is not None and cur not in seen:
+                if cur == target:
+                    return True
+                seen.add(cur)
+                cur = parent.get(cur)
+            return False
+
+        for i, p in enumerate(pages, 1):
+            key = self.key_of(p['url'], p['viewport'])
+            for a_aid in raw[key]:
+                refs = (self.meta.get(a_aid) or {}).get('refs') or []
+                for c_aid in refs:
+                    ok = (c_aid in home and c_aid != a_aid and c_aid not in parent
+                          and not chain_has(a_aid, c_aid)
+                          and (CROSS_SCREEN_CHILDREN or home[c_aid][1] == key))
+                    if ok:
+                        parent[c_aid] = a_aid
+                    else:
+                        loose.setdefault(a_aid, []).append(c_aid)
+
+        def children_of(a_aid):
+            kids = [c for c, par in parent.items() if par == a_aid]
+            refs = (self.meta.get(a_aid) or {}).get('refs') or []
+            refs_pos = {c: n for n, c in enumerate(refs)}
+            want = self.child_order.get(a_aid) or []
+            want_pos = {c: n for n, c in enumerate(want)}
+            # 사람이 드래그로 정한 순서(child_order)가 있으면 그것부터, 없거나
+            # 새로 연결된 것은 연결한 순서(refs) 뒤에 붙인다.
+            kids.sort(key=lambda c: (want_pos.get(c, len(want) + refs_pos.get(c, 0)),))
+            return kids
+
+        index = {}
+
+        def build(a_aid, label, depth, screen):
+            home_i, home_key = home[a_aid]
+            node = {'aid': a_aid, 'ann': ann_of[a_aid], 'key': home_key,
+                    'home': home_i, 'screen': screen, 'label': label,
+                    'depth': depth, 'parent': parent.get(a_aid), 'children': [],
+                    'foreign': home_i != screen}
+            index[a_aid] = node
+            for j, c_aid in enumerate(children_of(a_aid), 1):
+                node['children'].append(
+                    build(c_aid, u'%s.%d' % (label, j), depth + 1, screen))
+            return node
+
+        roots_by_page = []
+        for i, p in enumerate(pages, 1):
+            key = self.key_of(p['url'], p['viewport'])
+            roots, n = [], 0
+            for a_aid in raw[key]:
+                if a_aid in parent:
+                    continue
+                n += 1
+                roots.append(build(a_aid, str(n), 0, i))
+            roots_by_page.append(roots)
+        return roots_by_page, index, loose
+
+    @staticmethod
+    def _flatten(nodes):
+        """트리를 전위 순회로 편다(부모가 자식보다 먼저 나온다 - 트리뷰 삽입 순서)."""
+        out = []
+        for node in nodes:
+            out.append(node)
+            out.extend(Store._flatten(node['children']))
+        return out
+
     def move_page(self, key, delta):
-        """화면(그룹) 자체의 순서를 사람이 정한다(프4).
+        """화면(그룹) 자체의 순서를 사람이 정한다(프4, Ctrl+↑/↓).
 
         ★화면 번호는 이 순서로 붙고, 연결(`- 관련:`)은 렌더 시점에 번호를 해석하므로
           순서를 바꿔도 참조가 어긋나지 않는다. 화면 정체성 (주소, 해상도) 은 건드리지 않는다."""
@@ -352,6 +467,18 @@ class Store(object):
             if i == j:
                 return keys
             keys.insert(j, keys.pop(i))
+        return self.reorder_pages(keys)
+
+    def reorder_pages(self, keys):
+        """목록에서 화면 줄을 드래그해 옮긴 뒤의 최종 순서를 저장한다(브1).
+
+        ★move_page 와 저장 경로를 하나로 둔다 - 따로 두면 한쪽만 고쳤을 때
+          Ctrl+↑/↓ 와 드래그의 결과가 갈린다. 주어진 목록이 지금 화면 전체와
+          정확히 같을 때만 반영한다(화면이 느는·주는 동안의 드래그를 막는다)."""
+        with self.lock:
+            keys = [tuple(k) for k in keys]
+            if set(keys) != set(self.pages.keys()) or len(keys) != len(self.pages):
+                return None
             self.pages = OrderedDict((k, self.pages[k]) for k in keys)
             if not self._replaying:
                 self._append_jsonl({'t': 'porder',
@@ -368,7 +495,7 @@ class Store(object):
             self.pages = OrderedDict((k, self.pages[k]) for k in ordered)
 
     def set_order(self, key, ids):
-        """화면 안 주석 순서를 사람이 정한다(프4)."""
+        """화면 안 주석(최상위) 순서를 사람이 정한다(프4)."""
         with self.lock:
             self.order[key] = list(ids)
             if not self._replaying:
@@ -376,22 +503,15 @@ class Store(object):
                                     'ids': list(ids)})
                 self.write_md()
 
-    def move_annotation(self, key, aid, delta):
-        """주석 하나를 위/아래로 옮긴다. 옮긴 뒤 순서를 돌려준다."""
+    def set_child_order(self, parent_aid, ids):
+        """한 상위 주석 밑, 하위 주석끼리의 순서를 사람이 정한다(브5·6).
+
+        ★화면(key) 이 아니라 부모 aid 로 저장한다 - 하위는 다른 화면 것일 수 있다."""
         with self.lock:
-            p = self.pages.get(key)
-            if not p:
-                return None
-            ids = [k for k, _ in self._ordered(key, p['annotations'])]
-            if aid not in ids:
-                return None
-            i = ids.index(aid)
-            j = max(0, min(len(ids) - 1, i + delta))
-            if i == j:
-                return ids
-            ids.insert(j, ids.pop(i))
-        self.set_order(key, ids)
-        return ids
+            self.child_order[parent_aid] = list(ids)
+            if not self._replaying:
+                self._append_jsonl({'t': 'corder', 'aid': parent_aid, 'ids': list(ids)})
+                self.write_md()
 
     def _page(self, key):
         p = self.pages.get(key)
@@ -403,6 +523,7 @@ class Store(object):
                 'first_seen': _now(), 'last_seen': _now(),
                 'annotations': OrderedDict(),   # id -> annotation
                 'console': [], 'network': [], 'api': [],
+                'layout': None,   # 레이아웃 모드에서 옮긴 것(브3) - set_layout() 이 채운다
             }
             self.pages[key] = p
         return p
@@ -428,6 +549,15 @@ class Store(object):
             p['last_seen'] = _now()
             return key
 
+    def _find_home(self, aid):
+        """이 주석 id 가 지금 어느 화면에 살고 있는지 찾는다(전역 유일 id 전제).
+
+        apply() 의 add/update/submit 이 엉뚱한 화면에 사본을 만들지 않게 먼저 확인한다."""
+        for key, pp in self.pages.items():
+            if aid in pp['annotations']:
+                return (key, pp)
+        return None
+
     def merge_unknown(self, url, viewport):
         """해상도를 알기 전에 쌓인 (url, '?') 항목을 실제 해상도 화면으로 옮긴다.
 
@@ -452,6 +582,8 @@ class Store(object):
             for k in ('title', 'dpr', 'referrer'):
                 if not new.get(k) and old.get(k):
                     new[k] = old[k]
+            if not new.get('layout') and old.get('layout'):
+                new['layout'] = old['layout']
             new['first_seen'] = min(new['first_seen'], old['first_seen'])
             self.pages.pop(src, None)
             self.moved[src] = dst
@@ -459,6 +591,27 @@ class Store(object):
             #   '해상도 미상' 화면이 한 줄 더 살아나 라이브와 결과가 달라진다(실측).
             if not self._replaying:
                 self._append_jsonl({'t': 'merge', 'url': url, 'viewport': viewport})
+
+    def set_layout(self, payload):
+        """레이아웃 모드(요소 이동·배치 상자)에서 옮긴 것을 화면에 붙인다(브3).
+
+        ★agentation 의 저장 상태를 그대로 치환한다(누적하지 않는다) - inject.jsx 가
+          보낼 때마다 그 시점의 전체 diff 를 계산해 보내므로, 여기서 합치면 이미
+          되돌린 변경까지 남는다. 손대지 않은 화면(layout 이 None) 은 애초에 오지
+          않는다(inject.jsx 의 lastLayoutSig 초기값이 'null' 이라서)."""
+        with self.lock:
+            key = self.touch_page(payload)
+            if key is None:
+                return
+            p = self.pages[key]
+            lay = payload.get('layout') or None
+            if lay is None and not p.get('layout'):
+                return                      # 원래도 없었다 - 기록을 늘리지 않는다
+            p['layout'] = lay
+            if not self._replaying:
+                self._append_jsonl({'t': 'layout', 'url': key[0], 'viewport': key[1],
+                                    'layout': lay})
+                self.write_md()
 
     # ── 이벤트 적용 ────────────────────────────────────────────
     def apply(self, payload, persist=True):
@@ -475,20 +628,32 @@ class Store(object):
                     if _page_id(k[0]) == _page_id(p['url'])]
             if kind == 'delete':
                 for a in anns:
-                    for pp in same:
-                        pp['annotations'].pop(a.get('id'), None)
+                    aid = a.get('id')
+                    # ★id 는 전역 유일하다. same(같은 경로) 만 지우면, 해상도가 바뀐
+                    #   사이에 update 로 다른 화면에 새로 생긴 사본(아래 참고)이 남는다.
+                    for pp in self.pages.values():
+                        pp['annotations'].pop(aid, None)
                     # 자기 메타는 버린다. 이 주석을 가리키던 연결은 남겨 두고
                     # 렌더에서 '(삭제된 주석)' 으로 보여 준다 - 조용히 사라지지 않게.
-                    self.meta.pop(a.get('id'), None)
+                    self.meta.pop(aid, None)
             elif kind == 'clear':
                 for pp in same:
                     for aid in list(pp['annotations'].keys()):
                         self.meta.pop(aid, None)
                     pp['annotations'].clear()
             else:                                   # add · update · submit · copy
+                # ★agentation 은 주석을 pathname 단위로 저장해 해시·쿼리·해상도가
+                #   달라도 같은 핀을 보여준다. 그 화면에서 메모를 고치면 update 가
+                #   다른 (url,viewport) 키로 도착해, 여기서 그냥 삽입하면 같은 id 가
+                #   두 화면에 남는다(실사용 보고: "주석이 2번씩 달린다"). id 가 이미
+                #   사는 화면을 찾아 그 자리에서 갱신한다 - 새 화면에 또 넣지 않는다.
                 for a in anns:
                     aid = a.get('id') or str(len(p['annotations']) + 1)
-                    p['annotations'][aid] = a
+                    home = self._find_home(aid)
+                    if home is not None and home[0] != key:
+                        home[1]['annotations'][aid] = a
+                    else:
+                        p['annotations'][aid] = a
             if persist and not self._replaying:
                 self._append_jsonl({'t': 'annotation', 'payload': payload})
                 self.write_md()
@@ -600,33 +765,37 @@ class Store(object):
         return spots
 
     def tree_rows(self):
-        """목록용 행. 화면 한 줄 + 그 밑에 붙는 주석 줄들.
+        """목록용 행. 화면 한 줄 + 그 밑에 붙는 주석 줄들(하위 주석은 더 깊이).
 
         화면 번호는 render() 와 같은 순서로 붙는다(_render_pages 와 같은 필터) -
         목록의 [화면 2] 와 결과 문서의 [화면 2] 가 어긋나면 연결을 읽을 수 없다."""
         out = []
         with self.lock:
-            # ★render() 와 같은 목록·같은 순서를 쓴다. 따로 걸러 세면 목록의 [화면 2] 와
-            #   결과 문서의 [화면 2] 가 어긋나 연결을 못 읽는다.
-            for i, p in enumerate(self._render_pages(), 1):
+            pages = self._render_pages()
+            roots_by_page, _index, loose = self._nested(pages)
+            for i, p in enumerate(pages, 1):
                 anns = []
-                key = self.key_of(p['url'], p['viewport'])
-                for j, (aid, a) in enumerate(self._ordered(key, p['annotations']), 1):
+                for node in self._flatten(roots_by_page[i - 1]):
+                    aid, a = node['aid'], node['ann']
                     m = self.meta.get(aid) or {}
                     anns.append({
-                        'aid': aid, 'no': j,
+                        'aid': aid, 'no': node['label'], 'parent': node['parent'],
+                        'depth': node['depth'], 'foreign': node['foreign'],
+                        'home_screen': node['home'],
                         'element': a.get('element') or u'?',
                         'comment': a.get('comment') or u'',
                         'note': m.get('note') or u'',
-                        'refs': len(m.get('refs') or []),
+                        'refs': len(node['children']) + len(loose.get(aid) or []),
                         'expected': m.get('expected') or u'',
                         'priority': m.get('priority') or u'',
+                        'files': len(self.attach.get(aid) or []),
                     })
                 out.append({
                     'no': i, 'title': p['title'] or u'(제목 없음)',
                     'vp': p['viewport'], 'url': p['url'],
                     'ann': len(p['annotations']), 'con': len(p['console']),
                     'net': len(p['network']), 'anns': anns,
+                    'layout': self._layout_rows(p),
                 })
         return out
 
@@ -634,12 +803,16 @@ class Store(object):
         """연결 대상 고르기용. 화면·주석 번호가 붙은 전체 목록(렌더와 같은 순서)."""
         out = []
         with self.lock:
-            for i, p in enumerate(self._render_pages(), 1):
-                key = self.key_of(p['url'], p['viewport'])
-                for j, (aid, a) in enumerate(self._ordered(key, p['annotations']), 1):
+            pages = self._render_pages()
+            roots_by_page, index, _loose = self._nested(pages)
+            for i, roots in enumerate(roots_by_page, 1):
+                for node in self._flatten(roots):
+                    aid, a = node['aid'], node['ann']
                     out.append({
-                        'aid': aid, 'screen': i, 'no': j,
-                        'title': p['title'] or u'(제목 없음)', 'vp': p['viewport'],
+                        'aid': aid, 'screen': i, 'no': node['label'],
+                        'parent': node['parent'],
+                        'title': (pages[i - 1]['title'] or u'(제목 없음)'),
+                        'vp': pages[i - 1]['viewport'],
                         'element': a.get('element') or u'?',
                         'comment': a.get('comment') or u'',
                     })
@@ -685,6 +858,113 @@ class Store(object):
                 self._append_jsonl({'t': 'closing', 'text': self.closing})
                 self.write_md()
 
+    # ── 첨부 그림(브8) ────────────────────────────────────────
+    # ★스크린샷은 도구가 찍지 않는다(README) - 사람이 메모창에 붙여넣거나(Ctrl+V·
+    #   드래그) 보강 창에서 파일로 고른 것만 붙는다. jsonl 에는 파일 이름만 남기고
+    #   그림 본문(base64)은 out/attach 에 파일로만 둔다 - 기록이 순식간에 커지는
+    #   것을 막고, latest.md 도 계속 가벼운 텍스트로 남는다.
+    def _ensure_attach_dir(self):
+        if not os.path.isdir(self.attach_dir):
+            os.makedirs(self.attach_dir)
+
+    def _next_attach_name(self, aid, names, ext):
+        n = len(names) + 1
+        while True:
+            fname = '%s-%d%s' % (aid, n, ext)
+            if not os.path.exists(os.path.join(self.attach_dir, fname)):
+                return fname
+            n += 1
+
+    def _set_attach(self, aid, names):
+        with self.lock:
+            if names:
+                self.attach[aid] = list(names)
+            else:
+                self.attach.pop(aid, None)
+            if not self._replaying:
+                self._append_jsonl({'t': 'attach', 'aid': aid, 'files': list(names or [])})
+                self.write_md()
+
+    def add_images(self, aid, images):
+        """메모창에 붙인 그림(브8). images = [{name?, mime?, data(base64 또는 data URL)}…]."""
+        if not images:
+            return []
+        import base64
+        added = []
+        with self.lock:
+            self._ensure_attach_dir()
+            names = list(self.attach.get(aid) or [])
+            for img in images:
+                data = img.get('data') or ''
+                if data.startswith('data:') and ',' in data:
+                    data = data.split(',', 1)[1]
+                try:
+                    raw = base64.b64decode(data)
+                except Exception:
+                    continue
+                mime = (img.get('mime') or '').lower()
+                ext = ('.jpg' if 'jpeg' in mime or 'jpg' in mime else
+                       '.gif' if 'gif' in mime else
+                       '.webp' if 'webp' in mime else '.png')
+                fname = self._next_attach_name(aid, names, ext)
+                try:
+                    with open(os.path.join(self.attach_dir, fname), 'wb') as f:
+                        f.write(raw)
+                except Exception:
+                    continue
+                names.append(fname)
+                added.append(fname)
+            if added:
+                self._set_attach(aid, names)
+        return added
+
+    def add_attachment_file(self, aid, src_path):
+        """보강 창에서 사람이 파일을 골라 붙인다."""
+        import shutil
+        with self.lock:
+            self._ensure_attach_dir()
+            names = list(self.attach.get(aid) or [])
+            ext = os.path.splitext(src_path)[1] or '.png'
+            fname = self._next_attach_name(aid, names, ext)
+            shutil.copyfile(src_path, os.path.join(self.attach_dir, fname))
+            names.append(fname)
+            self._set_attach(aid, names)
+            return fname
+
+    def remove_attachment(self, aid, fname):
+        with self.lock:
+            names = list(self.attach.get(aid) or [])
+            if fname not in names:
+                return False
+            names.remove(fname)
+            try:
+                os.remove(os.path.join(self.attach_dir, fname))
+            except Exception:
+                pass
+            self._set_attach(aid, names)
+            return True
+
+    def get_attachments(self, aid):
+        with self.lock:
+            return list(self.attach.get(aid) or [])
+
+    def has_attachments(self):
+        with self.lock:
+            return any(self.attach.values())
+
+    def count_attachments(self):
+        with self.lock:
+            return sum(len(v) for v in self.attach.values())
+
+    def all_attachment_paths(self):
+        """(aid, 절대경로) 전체 목록 - 이슈에 올리기가 드롭할 파일들."""
+        with self.lock:
+            out = []
+            for aid, names in self.attach.items():
+                for fn in names:
+                    out.append((aid, os.path.join(self.attach_dir, fn)))
+            return out
+
     # ── 저장 ──────────────────────────────────────────────────
     def _append_jsonl(self, rec):
         try:
@@ -703,59 +983,70 @@ class Store(object):
     def _render_pages(self):
         """결과에 실리는 화면 목록. 화면 번호는 이 순서로 붙는다(목록과 렌더가 같아야 한다)."""
         return [p for p in self.pages.values()
-                if p['annotations'] or p['console'] or p['network'] or p.get('api')]
+                if p['annotations'] or p['console'] or p['network'] or p.get('api')
+                or p.get('layout')]
 
-    def _ref_index(self, pages):
-        """aid -> (화면번호, 주석번호, element, comment). 연결을 사람이 읽는 좌표로 옮긴다.
+    def _layout_rows(self, p):
+        """레이아웃 모드에서 옮긴 것(브3) - 목록·결과 문서가 같은 표현을 쓴다."""
+        lay = p.get('layout') or {}
+        out = []
+        for m in (lay.get('moved') or []):
+            f, t = m.get('from') or {}, m.get('to') or {}
+            out.append({'label': u'⇄ %s' % (m.get('label') or '?'),
+                        'detail': u'(%s,%s %sx%s) → (%s,%s %sx%s)%s'
+                        % (f.get('x'), f.get('y'), f.get('w'), f.get('h'),
+                           t.get('x'), t.get('y'), t.get('w'), t.get('h'),
+                           u' · %s' % m['sel'] if m.get('sel') else u'')})
+        order = lay.get('order')
+        if order:
+            out.append({'label': u'⇄ 순서 변경',
+                        'detail': u' → '.join(str(x) for x in (order.get('to') or []))})
+        for pl in (lay.get('placements') or []):
+            out.append({'label': u'+ %s' % (pl.get('type') or '?'),
+                        'detail': u'%sx%s @(%s,%s)%s'
+                        % (pl.get('w'), pl.get('h'), pl.get('x'), pl.get('y'),
+                           u' "%s"' % pl['text'] if pl.get('text') else u'')})
+        return out
 
-        ★연결은 aid 로 저장하고 번호는 이 시점에 해석한다. 번호를 저장해 두면
-          화면 순서가 바뀌는 순간(되돌아온 화면·해상도 변경) 참조가 어긋난다."""
-        idx = {}
-        for i, p in enumerate(pages, 1):
-            key = self.key_of(p['url'], p['viewport'])
-            for j, (aid, a) in enumerate(self._ordered(key, p['annotations']), 1):
-                idx[aid] = (i, j, a.get('element') or u'?', a.get('comment') or u'')
-        return idx
-
-    def _render_index(self, pages):
-        """항목 목차. 한 줄에 하나 - 이슈 댓글에 그대로 붙일 수 있게.
+    def _render_index(self, roots_by_page):
+        """항목 목차. 한 줄에 하나(하위는 들여쓴 줄로) - 이슈 댓글에 그대로 붙일 수 있게.
 
         ★SC-295 인계 문서의 QA 요청 ④: 댓글이 "첨부하였습니다" 한 줄이라 이슈 검색·추적에
-          안 걸렸다. 문서 맨 앞에 제목 줄이 있으면 그걸 그대로 붙이면 된다."""
+          안 걸렸다. 문서 맨 앞에 제목 줄이 있으면 그걸 그대로 붙이면 된다.
+        ★번호를 매기는 것은 최상위(루트)뿐이다 - 하위는 상위 밑에 들여써 보여 준다.
+          하위까지 따로 세면 '항목 N건' 이 사람이 실제로 처리할 덩어리 수와 달라진다."""
         # 어디부터 볼지가 목차에서 보이게 한다.
         # ★미지정을 '낮음' 보다 앞에 둔다 - '낮음' 은 나중에 해도 된다고 사람이 판단한
         #   것이고, 미지정은 아직 판단이 안 된 것이라 눈에 띄어야 한다.
         rank = {'high': 0, 'mid': 1, '': 2, 'low': 3}
+
+        def prio_of(aid):
+            return (self.meta.get(aid) or {}).get('priority') or ''
+
+        def memo_of(a):
+            memo = (a.get('comment') or u'').replace(u'\n', u' ').strip()
+            return (memo[:60] + u'…') if len(memo) > 60 else memo
+
         items = []
-        for i, p in enumerate(pages, 1):
-            key = self.key_of(p['url'], p['viewport'])
-            multi = len(p['annotations']) > 1
-            for j, (aid, a) in enumerate(self._ordered(key, p['annotations']), 1):
-                m = self.meta.get(aid) or {}
-                items.append((rank.get(m.get('priority') or '', 3), i, j, aid, a,
-                              m.get('priority') or ''))
+        for i, roots in enumerate(roots_by_page, 1):
+            for j, node in enumerate(roots, 1):
+                items.append((rank.get(prio_of(node['aid']), 3), i, j, node))
         if not items:
             return []
         items.sort(key=lambda x: (x[0], x[1], x[2]))
         rows = []
-        for n, (_r, i, j, aid, a, prio) in enumerate(items, 1):
-            pr = PRIORITY_LABEL.get(prio, u'')
-            memo = (a.get('comment') or u'').replace(u'\n', u' ').strip()
-            if len(memo) > 60:
-                memo = memo[:60] + u'…'
-            rows.append(u'%d. [화면 %d] %d번 %s — %s%s'
-                        % (n, i, j, a.get('element') or u'?',
-                           memo or u'(메모 없음)',
+        for n, (_r, i, _j, node) in enumerate(items, 1):
+            aid, a = node['aid'], node['ann']
+            pr = PRIORITY_LABEL.get(prio_of(aid), u'')
+            rows.append(u'%d. [화면 %d] %s번 %s — %s%s'
+                        % (n, i, node['label'], a.get('element') or u'?',
+                           memo_of(a) or u'(메모 없음)',
                            u'  *(%s)*' % pr if pr else u''))
+            for child in self._flatten(node['children']):
+                ca = child['ann']
+                rows.append(u'   - %s %s — %s' % (child['label'],
+                            ca.get('element') or u'?', memo_of(ca) or u'(메모 없음)'))
         return [u'## 항목 %d건 (우선순위순)' % len(items), u''] + rows + [u'']
-
-    def _back_refs(self):
-        """연결의 반대 방향. 어느 쪽 주석을 읽어도 관계가 보이려면 필요하다."""
-        back = {}
-        for src, m in self.meta.items():
-            for dst in (m.get('refs') or []):
-                back.setdefault(dst, []).append(src)
-        return back
 
     def render(self):
         with self.lock:
@@ -769,12 +1060,16 @@ class Store(object):
                 lines += [u'## 총평', u'']
                 lines += self.closing.strip().splitlines()
                 lines.append(u'')
-            lines += self._render_index(pages)
+            roots_by_page, index, loose = self._nested(pages)
+            lines += self._render_index(roots_by_page)
             if not pages:
                 lines += [u'---', u'', u'(아직 주석이 없습니다)', u'']
                 return u'\n'.join(lines)
-            refidx = self._ref_index(pages)
-            backidx = self._back_refs()
+            # 연결의 반대 방향(상위 ←). 다른 화면 하위가 이 화면에서 빠져나간 개수도 센다.
+            back = {}
+            for aid, node in index.items():
+                if node['parent']:
+                    back.setdefault(node['parent'], []).append(aid)
             for i, p in enumerate(pages, 1):
                 lines += [u'---', u'',
                           u'# [화면 %d] %s  (%s)' % (i, p['title'] or u'(제목 없음)',
@@ -791,91 +1086,141 @@ class Store(object):
                     lines.append(u'- 이 화면은 iframe 안이었습니다')
                 if p['referrer']:
                     lines.append(u'- 이전 화면: %s' % p['referrer'])
-                lines += [u'- 주석 %d건' % len(p['annotations']), u'']
-                lines += self._render_annotations(
-                    self._ordered(self.key_of(p['url'], p['viewport']), p['annotations']),
-                    refidx, backidx, p['url'])
+                lines.append(u'- 주석 %d건' % len(p['annotations']))
+                # ★이 화면 소속인데 다른 화면의 상위 밑으로 옮겨 표시된 것이 있으면
+                #   '주석 N건' 인데 본문이 그보다 적어 보인다 - 그 이유를 적는다.
+                moved_out = sum(1 for aid in p['annotations']
+                                if index.get(aid) and index[aid]['screen'] != i)
+                if moved_out:
+                    lines.append(u'- 이 중 %d건은 상위 주석이 있는 다른 화면 밑에 표시됩니다'
+                                 % moved_out)
+                lines.append(u'')
+                lines += self._render_annotations(roots_by_page[i - 1], index, loose)
+                lines += self._render_layout(p)
                 lines += self._render_noise(p)
             return u'\n'.join(lines)
 
     @staticmethod
-    def _ref_label(refidx, aid):
-        hit = refidx.get(aid)
-        if not hit:
+    def _ref_label(index, aid):
+        node = index.get(aid)
+        if not node:
             return u'(삭제된 주석)'
-        i, j, element, comment = hit
+        a = node['ann']
+        comment = a.get('comment') or u''
         tail = u' — "%s"' % comment[:40] if comment else u''
-        return u'[화면 %d] %d번 %s%s' % (i, j, element, tail)
+        return u'[화면 %d] %s번 %s%s' % (node['screen'], node['label'],
+                                       a.get('element') or u'?', tail)
 
-    def _render_annotations(self, items, refidx, backidx, page_url=u''):
+    def _render_annotations(self, nodes, index, loose):
+        """주석 하나의 본문(재귀 - 하위는 바로 뒤에 이어 나온다).
+
+        ★번호는 트리에서 미리 매긴 label('1.1') 을 그대로 쓴다 - enumerate 로 다시
+          매기면 하위가 섞인 순서에서 번호가 화면·목차와 어긋난다."""
+        back_loose = {}
+        for src, dsts in loose.items():
+            for dst in dsts:
+                back_loose.setdefault(dst, []).append(src)
         lines = []
-        for i, (aid, a) in enumerate(items, 1):
-            m = self.meta.get(aid) or {}
-            lines += [u'## %d. %s' % (i, a.get('element') or u'?'), u'',
-                      u'> %s' % (a.get('comment') or u'(메모 없음)'), u'']
-            pr = PRIORITY_LABEL.get(m.get('priority') or '', u'')
-            if pr:
-                lines.append(u'- 우선순위: %s' % pr)
-            if m.get('expected'):
-                # 메모가 '현재', 이것이 '기대' 다. 받는 쪽이 되묻지 않게 나눈다.
-                exp = m['expected'].strip().splitlines()
-                lines.append(u'- 기대: %s' % exp[0])
-                for extra in exp[1:]:
-                    lines.append(u'  %s' % extra)
-            ts = _hhmmss(a.get('timestamp'))
-            if ts:
-                # ★이어지는 액션의 순서는 여기서만 읽을 수 있다(화면 키에는 시간이 없다).
-                lines.append(u'- 시각: %s' % ts)
-            if m.get('note'):
-                note = m['note'].strip().splitlines()
-                lines.append(u'- 보충: %s' % note[0])
-                for extra in note[1:]:              # 두 칸 들여쓰기로 같은 항목을 잇는다
-                    lines.append(u'  %s' % extra)
-            for dst in (m.get('refs') or []):
-                lines.append(u'- 관련: → %s' % self._ref_label(refidx, dst))
-            for src in backidx.get(aid, []):
-                lines.append(u'- 관련: ← %s' % self._ref_label(refidx, src))
-            lines += [u'- 경로: `%s`' % (a.get('elementPath') or u''),
-                      u'- 클래스: `%s`' % (a.get('cssClasses') or u'')]
-            again = self._archive_spots().get(
-                (_spot_url(page_url), a.get('elementPath') or u''))
-            if again:
-                # ★회차를 넘겨 같은 자리가 또 올라왔다. 받는 쪽이 제일 먼저 볼 줄이다.
-                lines.append(u'- ★재지적: 지난 회차에도 같은 자리 (%s)'
-                             % u' · '.join(again[-3:]))
-            if a.get('attrs'):
-                # ★서버가 요소에 실어 보낸 값이다. '무엇이 표시되느냐' 가 아니라
-                #   '무엇이 와 있느냐' 라서, 화면 탓인지 서버 탓인지를 여기서 가른다.
-                lines.append(u'- 속성: %s' % str(a['attrs'])[:300])
-            if a.get('selectedText'):
-                lines.append(u'- 선택 텍스트: %s' % a['selectedText'])
-            if a.get('nearbyText'):
-                lines.append(u'- 주변 텍스트: %s' % str(a['nearbyText'])[:200])
-            b = a.get('boundingBox')
-            b = b if isinstance(b, dict) else {}     # 형이 다르면 무시(외부에서 온 값)
-            if b:
-                lines.append(u'- 박스: x=%s y=%s w=%s h=%s'
-                             % (b.get('x'), b.get('y'), b.get('width'), b.get('height')))
-            lines += _geometry_lines(a.get('elementBoundingBoxes'))
-            if a.get('nearbyElements'):
-                lines.append(u'- 주변 요소: %s' % str(a['nearbyElements'])[:200])
-            # ★예전에는 원본 스타일을 300자에서 잘라 통째로 냈다. 그 줄은 font-family
-            #   목록이 앞을 먹어 매번 문장 중간에서 끊겼고, 그래서 읽히지 않았다.
-            #   같은 정보를 배치·색·글자 세 줄로 나눠 전부 읽히게 한다.
-            lay = _layout_bits(a.get('computedStyles'))
-            if lay:
-                lines.append(u'- 배치: %s' % u' · '.join(lay))
-            col = _color_bits(a.get('computedStyles'))
-            if col:
-                lines.append(u'- 색: %s' % u' · '.join(col))
-            txt = _text_bits(a.get('computedStyles'))
-            if txt:
-                lines.append(u'- 글자: %s' % u' · '.join(txt))
-            if a.get('reactComponents'):
-                lines.append(u'- React: %s' % a['reactComponents'])
-            if a.get('sourceFile'):
-                lines.append(u'- 소스: %s' % a['sourceFile'])
-            lines.append(u'')
+        for node in nodes:
+            lines += self._render_one(node, index, loose, back_loose)
+            lines += self._render_annotations(node['children'], index, loose)
+        return lines
+
+    def _render_one(self, node, index, loose, back_loose):
+        aid, a = node['aid'], node['ann']
+        m = self.meta.get(aid) or {}
+        head = a.get('element') or u'?'
+        if node['foreign']:
+            # ★다른 화면의 하위 주석이다 - 어느 화면 것인지 제목에서부터 밝힌다.
+            head = u'[화면 %d] %s' % (node['home'], head)
+        lines = [u'## %s. %s' % (node['label'], head), u'',
+                 u'> %s' % (a.get('comment') or u'(메모 없음)'), u'']
+        if node['foreign']:
+            hp = self._page(node['key'])
+            lines.append(u'- 화면: [화면 %d] %s (%s)'
+                         % (node['home'], hp['title'] or u'(제목 없음)',
+                            hp['viewport'] or u'해상도 미상'))
+            lines.append(u'- 주소: %s' % node['key'][0])
+        pr = PRIORITY_LABEL.get(m.get('priority') or '', u'')
+        if pr:
+            lines.append(u'- 우선순위: %s' % pr)
+        if m.get('expected'):
+            # 메모가 '현재', 이것이 '기대' 다. 받는 쪽이 되묻지 않게 나눈다.
+            exp = m['expected'].strip().splitlines()
+            lines.append(u'- 기대: %s' % exp[0])
+            for extra in exp[1:]:
+                lines.append(u'  %s' % extra)
+        ts = _hhmmss(a.get('timestamp'))
+        if ts:
+            # ★이어지는 액션의 순서는 여기서만 읽을 수 있다(화면 키에는 시간이 없다).
+            lines.append(u'- 시각: %s' % ts)
+        if m.get('note'):
+            note = m['note'].strip().splitlines()
+            lines.append(u'- 보충: %s' % note[0])
+            for extra in note[1:]:              # 두 칸 들여쓰기로 같은 항목을 잇는다
+                lines.append(u'  %s' % extra)
+        # ★연결 = 하위(1.1). 자식이 된 것은 바로 밑에 중첩돼 나오므로 따로 줄을 안
+        #   낸다. 하위가 되지 못한 것(loose)만 글로 남긴다 - 조용히 사라지지 않게.
+        for dst in loose.get(aid, []):
+            lines.append(u'- 하위: → %s' % self._ref_label(index, dst))
+        for src in back_loose.get(aid, []):
+            lines.append(u'- 상위: ← %s' % self._ref_label(index, src))
+        for fn in (self.attach.get(aid) or []):
+            # ★그림 본문은 여기 없다 - 파일 이름만 적는다(위 첨부 절 주석 참고).
+            #   추출(zip) 때 이 이름 그대로 '첨부/' 안에 함께 담긴다.
+            lines.append(u'- 첨부: 첨부/%s' % fn)
+        lines += [u'- 경로: `%s`' % (a.get('elementPath') or u''),
+                  u'- 클래스: `%s`' % (a.get('cssClasses') or u'')]
+        again = self._archive_spots().get(
+            (_spot_url(node['key'][0]), a.get('elementPath') or u''))
+        if again:
+            # ★회차를 넘겨 같은 자리가 또 올라왔다. 받는 쪽이 제일 먼저 볼 줄이다.
+            lines.append(u'- ★재지적: 지난 회차에도 같은 자리 (%s)'
+                         % u' · '.join(again[-3:]))
+        if a.get('attrs'):
+            # ★서버가 요소에 실어 보낸 값이다. '무엇이 표시되느냐' 가 아니라
+            #   '무엇이 와 있느냐' 라서, 화면 탓인지 서버 탓인지를 여기서 가른다.
+            lines.append(u'- 속성: %s' % str(a['attrs'])[:300])
+        if a.get('selectedText'):
+            lines.append(u'- 선택 텍스트: %s' % a['selectedText'])
+        if a.get('nearbyText'):
+            lines.append(u'- 주변 텍스트: %s' % str(a['nearbyText'])[:200])
+        b = a.get('boundingBox')
+        b = b if isinstance(b, dict) else {}     # 형이 다르면 무시(외부에서 온 값)
+        if b:
+            lines.append(u'- 박스: x=%s y=%s w=%s h=%s'
+                         % (b.get('x'), b.get('y'), b.get('width'), b.get('height')))
+        lines += _geometry_lines(a.get('elementBoundingBoxes'))
+        if a.get('nearbyElements'):
+            lines.append(u'- 주변 요소: %s' % str(a['nearbyElements'])[:200])
+        # ★예전에는 원본 스타일을 300자에서 잘라 통째로 냈다. 그 줄은 font-family
+        #   목록이 앞을 먹어 매번 문장 중간에서 끊겼고, 그래서 읽히지 않았다.
+        #   같은 정보를 배치·색·글자 세 줄로 나눠 전부 읽히게 한다.
+        lay = _layout_bits(a.get('computedStyles'))
+        if lay:
+            lines.append(u'- 배치: %s' % u' · '.join(lay))
+        col = _color_bits(a.get('computedStyles'))
+        if col:
+            lines.append(u'- 색: %s' % u' · '.join(col))
+        txt = _text_bits(a.get('computedStyles'))
+        if txt:
+            lines.append(u'- 글자: %s' % u' · '.join(txt))
+        if a.get('reactComponents'):
+            lines.append(u'- React: %s' % a['reactComponents'])
+        if a.get('sourceFile'):
+            lines.append(u'- 소스: %s' % a['sourceFile'])
+        lines.append(u'')
+        return lines
+
+    def _render_layout(self, p):
+        """레이아웃 모드에서 옮긴 것(브3). 목록(_layout_rows)과 같은 내용을 쓴다."""
+        rows = self._layout_rows(p)
+        if not rows:
+            return []
+        lines = [u'### 레이아웃 변경 %d건' % len(rows), u'']
+        for r in rows:
+            lines.append(u'- %s — %s' % (r['label'], r['detail']))
+        lines.append(u'')
         return lines
 
     @staticmethod
@@ -958,6 +1303,13 @@ class Store(object):
                                        rec.get('ids') or [])
                     elif t == 'porder':
                         self.set_page_order(rec.get('keys') or [])
+                    elif t == 'corder':
+                        self.set_child_order(rec.get('aid'), rec.get('ids') or [])
+                    elif t == 'layout':
+                        self.set_layout({'url': rec.get('url'), 'viewport': rec.get('viewport'),
+                                         'layout': rec.get('layout')})
+                    elif t == 'attach':
+                        self._set_attach(rec.get('aid'), rec.get('files') or [])
                     # 모르는 t 는 무시한다 - 옛 파일과 앞으로의 확장 양쪽을 위해.
             finally:
                 self._replaying = False
@@ -1021,7 +1373,9 @@ class Store(object):
             self.pages.clear()
             self.meta.clear()
             self.order.clear()
+            self.child_order.clear()
             self.moved.clear()
+            self.attach.clear()     # 파일은 그대로 - 'attach' 이벤트가 replay 로 되살린다
             self.closing = u''
             keep = set(self.skip)
             self.skip.clear()
@@ -1032,7 +1386,10 @@ class Store(object):
         """지난 기록(archive 의 jsonl)을 현재 목록에 합친다(프5).
 
         ★현재 기록에 '합친다'. 따로 보관하면 진실이 두 곳이 되고, 그다음 추출에서
-          무엇이 들어갔는지 사람이 못 센다."""
+          무엇이 들어갔는지 사람이 못 센다.
+        ★그 회차에 첨부 그림이 있었으면(브8) 옆의 '<stamp>-attach' 폴더에서 파일을
+          되돌린다(같은 이름으로 있으면 건드리지 않는다) - 안 그러면 'attach'
+          이벤트가 replay 될 때 파일 없는 첨부 줄만 되살아난다."""
         added = 0
         with io.open(path, encoding='utf-8') as f:
             lines = [l.strip() for l in f if l.strip()]
@@ -1045,6 +1402,20 @@ class Store(object):
                 with io.open(self.jsonl_path, 'a', encoding='utf-8') as out:
                     out.write(line + '\n')
                 added += 1
+            base = os.path.basename(path)
+            if base.endswith('-annotations.jsonl'):
+                adir = os.path.join(os.path.dirname(path),
+                                    base[:-len('-annotations.jsonl')] + '-attach')
+                if os.path.isdir(adir):
+                    self._ensure_attach_dir()
+                    for fn in os.listdir(adir):
+                        dst = os.path.join(self.attach_dir, fn)
+                        if not os.path.exists(dst):
+                            try:
+                                import shutil
+                                shutil.copyfile(os.path.join(adir, fn), dst)
+                            except Exception:
+                                pass
         self._reload()
         return added, self.counts()
 
@@ -1052,43 +1423,76 @@ class Store(object):
         """현재 내용을 파일로 저장한 뒤 비운다. 저장이 실패하면 원본을 보존한다.
 
         text 를 주면 그것을 그대로 쓴다 - 사람이 '저장 전 확인' 창에서 고친 내용이다(프7).
-        주지 않으면 지금 상태로 렌더한다."""
+        주지 않으면 지금 상태로 렌더한다.
+        ★첨부 그림이 있으면(브8) dest_path 가 .zip 이어야 한다 - 문서(.md)와
+          그림(첨부/)을 한 파일로 묶어야 "폴더째 넘겨야 그림이 간다" 를 피할 수
+          있다. 그림이 없으면 지금처럼 .md 하나로 끝난다(고르는 것은 app.py)."""
         with self.lock:
             if text is None:
                 text = self.render()
-            with io.open(dest_path, 'w', encoding='utf-8') as f:
-                f.write(text)
+            if dest_path.lower().endswith('.zip'):
+                import zipfile
+                md_name = os.path.splitext(os.path.basename(dest_path))[0] + '.md'
+                with zipfile.ZipFile(dest_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    zf.writestr(md_name, text)
+                    for names in self.attach.values():
+                        for fn in names:
+                            fpath = os.path.join(self.attach_dir, fn)
+                            if os.path.exists(fpath):
+                                zf.write(fpath, '첨부/' + fn)
+            else:
+                with io.open(dest_path, 'w', encoding='utf-8') as f:
+                    f.write(text)
             self.reset(keep_archive=True)
             return dest_path
 
     def reset(self, keep_archive=True):
-        """목록을 비운다. keep_archive 면 jsonl 을 타임스탬프 이름으로 옮겨 남긴다."""
+        """목록을 비운다. keep_archive 면 jsonl·첨부 그림을 타임스탬프 이름으로
+        옮겨 남긴다(같은 stamp 를 써서 어느 회차 것인지 짝을 맞춘다)."""
         with self.lock:
-            if keep_archive and os.path.exists(self.jsonl_path):
-                stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-                arch = os.path.join(self.out_dir, 'archive')
+            stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            arch = os.path.join(self.out_dir, 'archive')
+            if keep_archive and (os.path.exists(self.jsonl_path)
+                                  or (os.path.isdir(self.attach_dir)
+                                      and os.listdir(self.attach_dir))):
                 if not os.path.isdir(arch):
                     os.makedirs(arch)
                 # ★같은 초에 두 번 비우면 앞의 회차를 덮어썼다. 번호를 붙여 남긴다.
-                dest = os.path.join(arch, '%s-annotations.jsonl' % stamp)
                 seq = 1
-                while os.path.exists(dest):
+                dest = os.path.join(arch, '%s-annotations.jsonl' % stamp)
+                adest = os.path.join(arch, '%s-attach' % stamp)
+                while os.path.exists(dest) or os.path.exists(adest):
                     seq += 1
-                    dest = os.path.join(arch,
-                                        '%s_%03d-annotations.jsonl' % (stamp, seq))
-                try:
-                    os.replace(self.jsonl_path, dest)
-                except Exception:
-                    pass
-            elif os.path.exists(self.jsonl_path):
-                try:
-                    os.remove(self.jsonl_path)
-                except Exception:
-                    pass
+                    dest = os.path.join(arch, '%s_%03d-annotations.jsonl' % (stamp, seq))
+                    adest = os.path.join(arch, '%s_%03d-attach' % (stamp, seq))
+                if os.path.exists(self.jsonl_path):
+                    try:
+                        os.replace(self.jsonl_path, dest)
+                    except Exception:
+                        pass
+                if os.path.isdir(self.attach_dir) and os.listdir(self.attach_dir):
+                    try:
+                        os.replace(self.attach_dir, adest)
+                    except Exception:
+                        pass
+            else:
+                if os.path.exists(self.jsonl_path):
+                    try:
+                        os.remove(self.jsonl_path)
+                    except Exception:
+                        pass
+                if os.path.isdir(self.attach_dir):
+                    import shutil
+                    try:
+                        shutil.rmtree(self.attach_dir)
+                    except Exception:
+                        pass
             self.pages.clear()
             self.meta.clear()
             self.order.clear()
+            self.child_order.clear()
             self.moved.clear()
+            self.attach.clear()
             self.skip.clear()
             self.closing = u''
             self._spots = None      # 방금 회차가 archive 로 들어갔다 - 다시 읽어야 한다

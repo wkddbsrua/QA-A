@@ -30,6 +30,28 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         return document === myDoc;
     }
 
+    /* ── 타이머 ────────────────────────────────────────────────
+     * ★문서가 바뀌면(셸이 iframe 에 새 문서를 받으면) 옛 인스턴스의 타이머를 전부 끊는다.
+     *   예전에는 '촘촘한 구간' 타이머 하나만 끊었고 느린 구간·팝업 감시는 그대로 남아,
+     *   화면을 옮길 때마다 죽은 인스턴스의 타이머가 쌓였다. */
+    var timers = [];
+
+    function stopTimers() {
+        for (var i = 0; i < timers.length; i++) {
+            try { clearInterval(timers[i]); } catch (e) { /* 무시 */ }
+        }
+        timers = [];
+    }
+
+    function every(fn, ms) {
+        var id = setInterval(function () {
+            if (!isMine()) { stopTimers(); return; }     // 문서가 바뀌었다 - 손을 뗀다
+            fn();
+        }, ms);
+        timers.push(id);
+        return id;
+    }
+
     var MIN_SIZE = 200;          // 광고·트래킹용 초소형 iframe 에는 띄우지 않는다
     var SHARE = 0.5;             // 부모 화면의 이 비율 이상을 차지하면 '지배 프레임'
     var FAST_MS = 6000;          // 처음 6초는 촘촘히 본다(iframe 을 나중에 만드는 셸)
@@ -104,14 +126,55 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         try { return !!window.__qaForceTop; } catch (e) { return false; }
     }
 
-    function shouldMount() {
-        if (!document.body) return false;
-        if (forceTop()) return window.top === window.self;
-        if (window.top === window.self) return !dominantFrameExists();
+    function bigEnough() {
+        // 광고·트래킹용 초소형 프레임과 '부모에 비해 작은' 프레임은 제외한다.
+        if (window.top === window.self) return true;
         if (window.innerWidth < MIN_SIZE || window.innerHeight < MIN_SIZE) return false;
         var pa = parentArea();
         if (pa && (window.innerWidth * window.innerHeight) < pa * SHARE) return false;
+        return true;
+    }
+
+    function shouldMount() {
+        if (!document.body) return false;
+        /* ★스위치가 켜져 있으면 최상위와 콘텐츠 iframe 에 '둘 다' 띄운다.
+         *   예전에는 최상위에만 띄웠다 - "상단바·좌측 메뉴 포함" 과 "iframe 안쪽 선택" 이
+         *   동시에 성립하지 않는다고 보았기 때문이다(부모의 전체화면 오버레이가 콘텐츠
+         *   클릭을 가로챈다는 관찰). 그러나 실측하니 지금 구조에서는 가로채지 않는다:
+         *   둘 다 띄우고 모드를 함께 켠 상태에서 GNB·LNB 는 최상위 문서가, 본문은 iframe
+         *   문서가 각각 정확히 잡았다(같은 출처 셸 · 교차출처 셸 모두).
+         *   대신 사람에게는 툴바를 하나만 보인다(hideBar - 본문 쪽은 감춘다). */
+        if (forceTop()) return bigEnough();
+        if (window.top === window.self) return !dominantFrameExists();
+        if (!bigEnough()) return false;
         return !dominantFrameExists();                      // 중첩 셸까지 재귀적으로 성립
+    }
+
+    /* ── 툴바는 하나만 보이게 ─────────────────────────────────
+     * ★'둘 다 고르기' 에서는 문서마다 툴바가 하나씩 있어야 한다(브라우저가 문서 경계를
+     *   넘겨주지 않으므로 - agentation 도 iframe 안으로 들어가지 않는다: 번들에
+     *   contentDocument/contentWindow 사용 0곳). 그러나 '사람에게 버튼이 둘로 보일'
+     *   이유는 없다(실사용 불만: "왜 두 개를 써야 하나").
+     *   그래서 바깥(최상위) 툴바만 남기고 본문 쪽 툴바는 감춘다 - 감춰도 요소 고르기·핀·
+     *   메모창은 그대로 동작한다. 모드는 프로그램이 두 문서에 함께 걸어 준다.
+     *   ★예전에는 겹치지 않게 위로 밀었는데(translateY), 새로고침 직후 몇 초 동안은
+     *     밀리기 전이라 두 툴바가 화면상 같은 좌표에 정확히 포개졌다(실측: 최상위
+     *     (892,1213) ≡ 본문 (224+668, 56+1157)). 그래서 "버튼이 사라져 하나가 됐다"
+     *     로 보였다. 자리를 옮기는 대신 아예 하나만 보이게 한다. */
+    function barHidden() {
+        return forceTop() && window.top !== window.self;
+    }
+
+    function hideBar() {
+        try {
+            var t = document.querySelector('[data-feedback-toolbar]');
+            if (!t) return;
+            var want = barHidden() ? '0' : '';
+            if (t.style.opacity === want) return;
+            t.style.opacity = want;
+            // 보이지 않는 것이 클릭을 먹으면 안 된다(그 자리에 페이지가 있다).
+            t.style.pointerEvents = barHidden() ? 'none' : '';
+        } catch (e) { /* 무시 */ }
     }
 
     /* ── 요소 속성 ──────────────────────────────────────────────
@@ -176,7 +239,7 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
     }
 
     /* ── 프로그램으로 보내기 ─────────────────────────────────── */
-    function push(kind, output, annotations) {
+    function push(kind, output, annotations, extra) {
         var payload = {
             kind: kind,
             // 화면 정보: 페이지를 옮길 때마다 이 값들이 주석과 함께 누적된다.
@@ -207,6 +270,11 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
             output: output || '',
             annotations: withAttrs(kind, annotations)
         };
+        if (extra) {
+            for (var k in extra) {
+                if (Object.prototype.hasOwnProperty.call(extra, k)) payload[k] = extra[k];
+            }
+        }
         try {
             // CDP Runtime.addBinding 으로 프로그램이 만들어 둔 함수. 네트워크를 쓰지 않는다.
             window.__qaPush(JSON.stringify(payload));
@@ -263,8 +331,15 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
             React.createElement(Agentation, {
                 // 메모를 다는 즉시 넘긴다. Copy/Send 를 눌러야만 전송되던 것이
                 // "코멘트를 달았는데 목록에 없다" 의 원인이었다.
-                onAnnotationAdd: function (a) { push('add', '', [a]); },
-                onAnnotationUpdate: function (a) { push('update', '', [a]); },
+                // 브8: 그 메모창에 붙여 둔 그림이 있으면 함께 보낸다.
+                onAnnotationAdd: function (a) {
+                    var imgs = imagesToSend();
+                    push('add', '', [a], imgs ? { images: imgs } : null);
+                },
+                onAnnotationUpdate: function (a) {
+                    var imgs = imagesToSend();
+                    push('update', '', [a], imgs ? { images: imgs } : null);
+                },
                 onAnnotationDelete: function (a) { push('delete', '', [a]); },
                 onAnnotationsClear: function (as) { push('clear', '', as || []); },
                 onCopy: function (md) { push('copy', md, null); },
@@ -448,7 +523,10 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
      *   모드와 함께 생겼다 사라지는 것은 '고르기 오버레이' 하나뿐이다(실측 0 ↔ 1).
      *   우리 UI 안으로 범위를 좁혀야 한다 - 페이지에도 overlay 가 15개씩 있다. */
     function modeOn() {
-        return !!document.querySelector('[data-agentation-root] [class*="overlay"]');
+        /* ★대소문자를 가리지 않는다(`i` 플래그). vendor 번들을 갱신하면서 클래스 이름이
+         *   Overlay 로 바뀌기만 해도 여기가 조용히 false 가 되고, 그러면 클릭 차단까지
+         *   같이 풀려 페이지가 그냥 눌린다 - 가장 알아채기 어려운 고장이다. */
+        return !!document.querySelector('[data-agentation-root] [class*="overlay" i]');
     }
 
     function guardEsc() {
@@ -471,6 +549,19 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
                 return;
             }
             if (modeOn()) {
+                /* ★메모창이 열려 있는데 포커스가 그 안에 없으면 agentation 은 Esc 에
+                 *   아무 반응도 하지 않는다(실측: 모드도 안 꺼지고 메모창도 안 닫힘).
+                 *   사람에게는 "Esc 가 안 먹는다" 로 보인다 - 우리가 대신 닫아 준다.
+                 *   글자가 들어 있으면 건드리지 않는다(쓰던 글을 잃게 하지 않는다). */
+                var pop = openPopup();
+                if (pop && !pop.contains(document.activeElement) && !popupBusy() &&
+                        !pop.hasAttribute('data-qa-escd')) {
+                    pop.setAttribute('data-qa-escd', '1');   // ★같은 노드에 두 번 하지 않는다
+                    esc(pop.querySelector('textarea') || pop);
+                    e.stopPropagation();
+                    e.preventDefault();
+                    return;
+                }
                 if (!pageModalOpen()) return;   // 평소대로 agentation 이 모드를 끈다
                 e.stopPropagation();
                 if (window.console) {
@@ -527,7 +618,7 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
             var all = [t].concat([].slice.call(t.querySelectorAll('*')));
             for (var i = 0; i < all.length; i++) {
                 var e = all[i], r = e.getBoundingClientRect();
-                if (getComputedStyle(e).pointerEvents !== 'auto') continue;
+                if (!barHidden() && getComputedStyle(e).pointerEvents !== 'auto') continue;
                 if (r.width >= 24 && r.height >= 24 && r.width <= 60) return e;
             }
         } catch (e) { /* 무시 */ }
@@ -552,14 +643,33 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
                 }, true);
             });
 
+        /* ★`e.detail >= 2` 하나로 판정하지 않는다. 브라우저는 두 클릭 사이에 마우스가
+         *   몇 px 만 움직이거나 간격이 벌어지면 detail 을 1 로 되돌린다 - 그러면 아무리
+         *   더블클릭해도 영영 아무것도 잡히지 않는다("클릭이 안 먹는다" 의 한 갈래).
+         *   그래서 우리가 직접 시간·거리로 두 번째 클릭을 센다(사람 손에 맞춰 넉넉히). */
+        var PAIR_MS = 800, PAIR_PX = 24;
+        var firstAt = 0, firstX = 0, firstY = 0;
+
+        function isSecond(e) {
+            if ((e.detail || 1) >= 2) return true;
+            if (!firstAt) return false;
+            if (Date.now() - firstAt > PAIR_MS) return false;
+            return Math.abs(e.clientX - firstX) <= PAIR_PX &&
+                   Math.abs(e.clientY - firstY) <= PAIR_PX;
+        }
+
         document.addEventListener('click', function (e) {
             if (!mounted() || !modeOn() || isOurs(e.target)) return;
-            if ((e.detail || 1) < 2) {
+            if (!isSecond(e)) {
                 // 첫 클릭: 아무 일도 일어나지 않게 한다(agentation 까지 차단).
+                firstAt = Date.now();
+                firstX = e.clientX;
+                firstY = e.clientY;
                 e.stopImmediatePropagation();
                 e.preventDefault();
                 return;
             }
+            firstAt = 0;                        // 한 쌍을 썼다 - 다음 쌍은 처음부터
             // 두 번째 클릭만 선택으로 넘긴다. ★기본 동작도 막아야 한다 -
             // stopPropagation 만 하면 href="#" 링크가 실제로 눌려 주소에 해시가 붙었다(실측).
             e.preventDefault();
@@ -599,15 +709,33 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
             }
             // 커진 팝업이 화면을 벗어나면 안으로 당긴다.
             // ★'버튼이 아래로 넘어가서 안 눌러진다' 는 실사용 보고가 이 경우다.
+            /* ★두 가지가 겹쳐 화면 경계에서 팝업이 좌우로 흔들렸다(실사용 보고).
+             *   ①agentation 의 스타일시트가 이 팝업에 `transform: translateX(-50%)`
+             *     로 가운데 정렬을 걸어 둔다. 여기서 `style.transform` 을 직접 쓰면
+             *     그 값을 통째로 덮어써 -50% 가 사라지고 팝업이 폭의 절반만큼
+             *     오른쪽으로 튄다. `transform` 과 별개로 합성되는 CSS `translate`
+             *     속성을 쓰면 가운데 정렬은 그대로 두고 보정만 더할 수 있다.
+             *   ②보정값을 적용한 뒤의 rect 로 또 보정량을 계산하면, 매 tick 마다
+             *     '이미 당겨진 자리' 를 기준으로 다시 당겨 진동한다. 그래서 지금
+             *     적용해 둔 보정값을 먼저 빼서 '보정 전 자리' 를 되살린 뒤 새
+             *     보정량을 계산한다(멱등 - 같은 상태면 같은 결과). */
+            var prevDx = parseFloat(p.getAttribute('data-qa-dx') || '0') || 0;
+            var prevDy = parseFloat(p.getAttribute('data-qa-dy') || '0') || 0;
             var pr = p.getBoundingClientRect();
+            var baseLeft = pr.left - prevDx, baseRight = pr.right - prevDx;
+            var baseTop = pr.top - prevDy, baseBottom = pr.bottom - prevDy;
             var dx = 0, dy = 0;
-            if (pr.right > window.innerWidth - 8) dx = window.innerWidth - 8 - pr.right;
-            if (pr.left + dx < 8) dx += 8 - (pr.left + dx);
-            if (pr.bottom > window.innerHeight - 8) dy = window.innerHeight - 8 - pr.bottom;
-            if (pr.top + dy < 8) dy += 8 - (pr.top + dy);
-            var want = (dx || dy) ? 'translate(' + Math.round(dx) + 'px,' + Math.round(dy) + 'px)'
-                                  : '';
-            if (p.style.transform !== want) p.style.transform = want;
+            if (baseRight > window.innerWidth - 8) dx = window.innerWidth - 8 - baseRight;
+            if (baseLeft + dx < 8) dx += 8 - (baseLeft + dx);
+            if (baseBottom > window.innerHeight - 8) dy = window.innerHeight - 8 - baseBottom;
+            if (baseTop + dy < 8) dy += 8 - (baseTop + dy);
+            dx = Math.round(dx);
+            dy = Math.round(dy);
+            if (dx !== prevDx || dy !== prevDy) {
+                p.style.translate = (dx || dy) ? (dx + 'px ' + dy + 'px') : '';
+                p.setAttribute('data-qa-dx', String(dx));
+                p.setAttribute('data-qa-dy', String(dy));
+            }
         } catch (e) { /* 무시 */ }
     }
 
@@ -617,7 +745,7 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
                 childList: true, subtree: true
             });
         } catch (e) { /* 무시 */ }
-        setInterval(growPopup, 400);            // 관찰이 막히는 문서에서도 되게
+        every(growPopup, 400);                  // 관찰이 막히는 문서에서도 되게
     }
 
     /* ── 브9: 레이아웃 변경 개수를 화면에도 보여 준다 ─────────
@@ -645,7 +773,7 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
 
     function showMovedBadge() {
         try {
-            if (!isMine()) return;
+            if (!isMine() || barHidden()) return;   // 감춘 툴바 쪽에는 배지도 띄우지 않는다
             var n = mounted() ? rearrangeCount() : 0;
             var el = document.getElementById(BADGE_ID);
             if (!n) {
@@ -668,6 +796,88 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         } catch (e) { /* 무시 */ }
     }
 
+    /* ── 브3: 레이아웃 모드에서 옮긴 것을 목록에도 보인다 ──────────
+     * agentation 의 레이아웃(rearrange·design) 변경은 우리 콜백으로 나오지 않고
+     * localStorage 에만 남는다 - 그래서 지금까지는 개수만 세고(브9) 내용은
+     * 몰랐다(실사용 보고: "레이아웃 기능 주석 작성시 목록에서 해당 주석이 안
+     * 보입니다"). 내용을 읽어 프로그램에 보낸다 - 새 기능이 아니라 agentation
+     * 이 이미 저장해 둔 것을 마저 전달하는 것이다. */
+    function rearrangeState() {
+        try {
+            var raw = localStorage.getItem('agentation-rearrange-' + location.pathname);
+            return raw ? JSON.parse(raw) : null;
+        } catch (e) { return null; }
+    }
+
+    function designPlacements() {
+        /* ★agentation-design-<pathname> 은 배열이 그대로 저장된다
+         *   ({placements:[...]} 이 아니다 - vendor 번들 실측). 배열이 아니면 버린다. */
+        try {
+            var raw = localStorage.getItem('agentation-design-' + location.pathname);
+            var v = raw ? JSON.parse(raw) : null;
+            return (Object.prototype.toString.call(v) === '[object Array]') ? v : [];
+        } catch (e) { return []; }
+    }
+
+    function roundRect(r) {
+        if (!r) return null;
+        return { x: Math.round(r.x), y: Math.round(r.y),
+                 w: Math.round(r.width), h: Math.round(r.height) };
+    }
+
+    function rectMoved(a, b) {
+        if (!a || !b) return false;
+        return Math.abs(a.x - b.x) > 1 || Math.abs(a.y - b.y) > 1 ||
+               Math.abs(a.width - b.width) > 1 || Math.abs(a.height - b.height) > 1;
+    }
+
+    function layoutDiff() {
+        var out = { moved: [], order: null, placements: [] };
+        var st = rearrangeState();
+        if (st && st.sections) {
+            for (var i = 0; i < st.sections.length; i++) {
+                var s = st.sections[i];
+                if (s && rectMoved(s.originalRect, s.currentRect)) {
+                    out.moved.push({ id: s.id, label: s.label || s.tagName || '?',
+                        tag: s.tagName || '', sel: s.selector || '',
+                        from: roundRect(s.originalRect), to: roundRect(s.currentRect) });
+                }
+            }
+            if (st.originalOrder) {
+                var now = st.sections.map(function (s) { return s.id; });
+                var before = st.originalOrder;
+                var changed = now.length !== before.length ||
+                    now.some(function (id, j) { return id !== before[j]; });
+                if (changed) out.order = { from: before, to: now };
+            }
+        }
+        var pl = designPlacements();
+        for (var k = 0; k < pl.length; k++) {
+            var p = pl[k];
+            if (!p) continue;
+            out.placements.push({ id: p.id, type: p.type || '?',
+                x: Math.round(p.x || 0), y: Math.round(p.y || 0),
+                w: Math.round(p.width || 0), h: Math.round(p.height || 0),
+                text: p.text || '' });
+        }
+        if (!out.moved.length && !out.order && !out.placements.length) return null;
+        return out;
+    }
+
+    // 손대지 않은 화면은 아예 보내지 않는다 - 초기값도 '변화 없음' 과 같은 값으로 둔다.
+    var lastLayoutSig = 'null';
+
+    function watchLayout() {
+        if (!isMine() || !mounted()) return;
+        var d;
+        try { d = layoutDiff(); } catch (e) { d = null; }
+        var sig;
+        try { sig = JSON.stringify(d); } catch (e) { sig = 'null'; }
+        if (sig === lastLayoutSig) return;
+        lastLayoutSig = sig;
+        push('layout', '', [], { layout: d });
+    }
+
     /* ── [브10] 지금 어느 모드인가 ─────────────────
      * 요구: "내가 지금 정확히 어느 모드인지 툴바에서 알 수 있게".
      * 툴바 위치(자동 / 최상위 고정)에 따라 고를 수 있는 범위가 갈리는데, 화면에는 그
@@ -681,18 +891,22 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
 
     function modeBadgeText() {
         var top = window.top === window.self;
-        var head = (forceTop() ? '최상위 고정' : '자동') + ' · ' +
+        var head = (forceTop() ? '둘 다 고르기' : '자동') + ' · ' +
             (top ? '최상위 문서' : 'iframe 문서');
         try { if (window.__qaVer) head += ' · ' + window.__qaVer; } catch (e) { /* 판 모름 */ }
         if (!modeOn()) return head;                     // 접힌 상태 - 한 줄만
         var can;
         if (!top) {
-            can = '이 iframe 안쪽을 고를 수 있습니다 (상단바·좌측 메뉴는 불가)';
+            can = forceTop()
+                ? '이 본문을 고를 수 있습니다 (상단바·좌측 메뉴는 위쪽 툴바로)'
+                : '이 iframe 안쪽을 고를 수 있습니다 (상단바·좌측 메뉴는 불가)';
         } else if (dominantFrameExists()) {
-            // 최상위에 툴바가 있는데 같은 출처 콘텐츠 iframe 이 있다 = 최상위 고정 모드
-            can = '상단바·좌측 메뉴를 고를 수 있습니다 (iframe 안쪽은 불가)';
+            can = forceTop()
+                ? '상단바·좌측 메뉴와 본문을 모두 고를 수 있습니다'
+                : '상단바·좌측 메뉴를 고를 수 있습니다 (iframe 안쪽은 불가)';
         } else if (foreignFrameExists()) {
-            can = '이 문서를 고를 수 있습니다 (다른 출처 iframe 안쪽은 그 안의 툴바로)';
+            can = '이 문서를 고를 수 있습니다 '
+                + '(다른 출처 iframe 안쪽은 그 안의 툴바가 맡습니다 - 모드는 같이 켜집니다)';
         } else {
             can = '이 화면 전부를 고를 수 있습니다';
         }
@@ -701,7 +915,7 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
 
     function showModeBadge() {
         try {
-            if (!isMine()) return;
+            if (!isMine() || barHidden()) return;   // 배지도 하나만
             var el = document.getElementById(MODE_ID);
             if (!mounted()) {
                 if (el && el.parentNode) el.parentNode.removeChild(el);
@@ -740,35 +954,67 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         resizeTimer = setTimeout(announce, 400);            // 끌어 조절하는 동안 쏟아지지 않게
     }
 
+    /* ★스타일이 안 들어간 채로 렌더된 툴바는 position:static 으로 문서 맨 아래에
+     *   깔려 '없는 것' 과 같다(실측: 요소 128개가 렌더됐는데 style 태그는 0개).
+     *   프로그램의 주입 점검은 이것을 잡아내지만, 잡아낸 뒤에 할 수 있는 일이 없었다.
+     *   여기서 한 번 다시 붙여 본다(무한 반복은 하지 않는다 - 두 번까지). */
+    var healed = 0;
+
+    function healStyles() {
+        if (healed >= 2) return;
+        try {
+            var t = document.querySelector('[data-feedback-toolbar]');
+            if (!t) return;
+            if (getComputedStyle(t).position === 'fixed') return;
+            healed++;
+            if (window.console) console.info('[화면주석] 툴바 스타일이 빠져 다시 붙입니다.');
+            unmount();
+            mount();
+        } catch (e) { /* 무시 */ }
+    }
+
+    /* ★주소만 바뀌고 문서는 그대로인 화면(SPA·해시 이동)에서는 로드 통지가 오지 않는다.
+     *   그러면 뒤이어 남긴 주석이 '직전 화면' 에 붙어, 결과 문서의 화면 목록이 실제와
+     *   어긋난다. 주소가 바뀌면 그 사실만 다시 알린다(추가 기능이 아니라 귀속 교정이다). */
+    var lastUrl = '';
+
+    function watchUrl() {
+        try {
+            if (location.href === lastUrl) return;
+            lastUrl = location.href;
+            announce();
+        } catch (e) { /* 무시 */ }
+    }
+
     function watchFrames() {
         // 셸은 문서가 로드된 뒤 JS 로 iframe 을 만들고 탭마다 src 를 갈아치운다.
         // 그래서 "지금 지배 프레임이 있는가" 를 한 번만 보고 끝내면 안 된다.
         // 처음에는 촘촘히, 그 뒤에는 느리게 계속 본다(구조가 나중에 또 바뀐다).
         var until = Date.now() + FAST_MS;
-        var timer = null;
+        var fast = null;
 
         function tick() {
-            if (!isMine()) {                                // 문서가 바뀌었다 - 손을 뗀다
-                if (timer) clearInterval(timer);
-                return;
-            }
+            watchUrl();                      // 주소만 바뀌는 화면(SPA)도 화면으로 센다
             if (mounted()) {
                 if (!shouldMount()) unmount();
                 else {
                     keepOnTop();             // 모달이 열렸다 닫혔을 수 있다
+                    healStyles();            // 스타일 없이 렌더된 툴바를 되살린다
+                    hideBar();               // 본문 쪽 툴바는 감춘다(버튼은 하나만)
                     showMovedBadge();        // 레이아웃 변경 개수(브9)
                     showModeBadge();         // 지금 어느 모드인가
+                    watchLayout();           // 레이아웃 변경 내용을 목록에도(브3)
                 }
             } else {
                 mount();
             }
-            if (timer && Date.now() > until) {              // 촘촘한 구간이 끝나면 느리게
-                clearInterval(timer);
-                timer = null;
-                setInterval(tick, SLOW_TICK);
+            if (fast && Date.now() > until) {               // 촘촘한 구간이 끝나면 느리게
+                clearInterval(fast);
+                fast = null;
+                every(tick, SLOW_TICK);
             }
         }
-        timer = setInterval(tick, FAST_TICK);
+        fast = every(tick, FAST_TICK);
     }
 
     /* ── 프로그램이 부르는 비우기 ─────────────────────────────
@@ -804,24 +1050,197 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
     /* 이 문서의 툴바를 토글한다. 부모 문서가 자식 프레임을 대신 켜 줄 때 쓴다 -
      * 셸 구조에서는 툴바가 iframe 에 있는데 Esc 는 포커스된 문서만 받는다(실측). */
     window.__qaToggleMode = function () {
-        return turnOn();
+        /* ★켜기만 하지 않는다. 같은 출처 셸에서는 툴바가 iframe 에 있고 Esc 는
+         *   최상위가 받는데, 여기서 켜기만 하면 사람이 Esc 로 모드를 끌 수 없다 -
+         *   모드가 켜진 동안 페이지는 클릭을 받지 못하므로 화면이 멈춘 것처럼 보인다
+         *   (실측: 같은 출처 셸에서 Esc 를 몇 번을 눌러도 계속 켜진 채였다). */
+        if (!mounted()) return false;
+        return modeOn() ? turnOff() : turnOn();
     };
 
     /* 모드를 켠다. ★툴바가 등장 애니메이션 중이면 클릭이 안 먹는 경우가 있다(실측:
      * Esc 를 눌렀는데 아무 일도 안 일어남). 사람이 두 번 누르지 않게 한 번만 더 시도한다. */
     function turnOn() {
         var btn = toggleButton();
-        if (!btn) return false;
-        btn.click();
+        if (btn) btn.click();
         setTimeout(function () {
             try {
                 if (modeOn()) return;
                 var b2 = toggleButton();
                 if (b2) b2.click();
+                /* ★둥근 버튼을 '크기' 로 찾는다(문구로 찾으면 한글화 표에 묶인다).
+                 *   그래서 못 찾거나 엉뚱한 것을 눌렀을 수 있다 - agentation 자체
+                 *   단축키(Ctrl+Shift+F)로 한 번 더 시도한다. 길이 둘이면 하나가 막혀도 켜진다. */
+                setTimeout(function () {
+                    try {
+                        if (modeOn()) return;
+                        document.dispatchEvent(new KeyboardEvent('keydown', {
+                            key: 'f', code: 'KeyF', ctrlKey: true, shiftKey: true,
+                            bubbles: true, cancelable: true
+                        }));
+                    } catch (e2) { /* 무시 */ }
+                }, 320);
             } catch (e) { /* 무시 */ }
         }, 320);
+        return !!btn;
+    }
+
+    /* ── 프레임 사이 모드 맞추기 ──────────────────────────────
+     * ★셸 구조에서 상단바·좌측 메뉴(최상위 문서)와 본문(iframe)은 서로 다른 문서다.
+     *   교차출처면 서로를 JS 로 부를 수 없어 두 툴바의 모드가 따로 논다 - Esc 를 받은
+     *   문서만 켜지고 나머지는 꺼진 채라 그쪽은 페이지가 평소대로 동작한다.
+     *   그것이 "gnb·lnb 만 클릭된다" 의 정체다(재현: 셸 + 교차출처 iframe →
+     *   최상위 mode=on / iframe mode=off, 본문을 더블클릭해도 메모창이 열리지 않았다.
+     *   반대로 iframe 에 포커스를 두고 Esc 를 누르면 본문만 잡히고 gnb·lnb 가 안 잡힌다 -
+     *   어느 쪽이 켜지는지는 그때 포커스가 어디 있었나로 갈려서 '간헐적' 으로 보였다).
+     *   교차출처를 넘는 다리는 프로그램(CDP)뿐이다. 바뀐 쪽이 알리면 프로그램이 같은
+     *   탭의 나머지 문서에 그대로 전달한다(다른 탭에는 보내지 않는다). */
+    var lastMode = null;        // 마지막으로 확인한 모드. null = 툴바 없음/아직 모름
+    var muteUntil = 0;          // 프로그램이 맞춰 주는 동안은 되받아 알리지 않는다
+    var wantMode = null;        // 프로그램이 이 문서에 걸어 달라고 한 값
+    var wantTries = 0;
+    var lastBeat = 0;      // 마지막으로 상태를 알린 시각(어긋남 자동 교정용)
+
+    /* ★[나가기] 버튼을 문구로 찾지 않는다(한글화 표가 바뀌면 조용히 깨진다).
+     *   agentation 은 document 의 keydown 으로 Esc 를 받아 모드를 끈다 -
+     *   사람이 누르는 것과 같은 길로 끈다. */
+    /* 지금 이 문서에서 메모를 쓰는 중인가(글자가 들어간 메모창이 열려 있다).
+     * ★쓰던 글을 잃게 하지 않는다 - 이 상태에서는 남이 시켜도 모드를 끄지 않는다. */
+    /* 지금 '실제로 떠 있는' 메모창. ★사라지는 중(퇴장 애니메이션)인 노드가 DOM 에
+     *   잠시 남는다 - 그것을 열린 것으로 세면, 우리가 Esc 를 계속 그쪽으로 돌려
+     *   모드를 영영 못 끄게 된다(실측: Esc 를 세 번 눌러도 안 꺼졌다). */
+    function openPopup() {
+        try {
+            var p = document.querySelector('[data-annotation-popup]');
+            if (!p) return null;
+            var st = getComputedStyle(p);
+            if (st.display === 'none' || st.visibility === 'hidden') return null;
+            if (parseFloat(st.opacity || '1') < 0.1) return null;
+            return p;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function popupBusy() {
+        try {
+            var p = openPopup();
+            if (!p) return false;
+            var ta = p.querySelector('textarea');
+            return !!(ta && String(ta.value || '').trim());
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function esc(el) {
+        el.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
+            bubbles: true, cancelable: true
+        }));
+    }
+
+    /* ★끄기에 Esc 를 쓰지 않는다. agentation 의 Esc 처리는 메모창 상태에 얽혀 있어
+     *   ("메모가 대기 중이면 아무것도 하지 않는다"), 메모창을 열어 둔 프레임은 Esc 를
+     *   몇 번을 보내도 모드가 꺼지지 않았다(실측: 세 번 눌러도 링크가 계속 안 눌렸다).
+     *   agentation 자체 단축키(Ctrl+Shift+F)는 그 상태와 무관하게 모드를 끈다 -
+     *   그 길로 끈다. 꺼질 때까지 짧게 여러 번 시도한다.
+     *   ★글자가 들어간 메모창이 있으면 그대로 둔다 - 쓰던 글을 잃게 하지 않는다. */
+    function turnOff() {
+        var tries = 0;
+        (function step() {
+            try {
+                if (!isMine() || !mounted() || !modeOn()) return;    // 다 됐다
+                if (popupBusy()) return;                             // 쓰는 중 - 기다린다
+                document.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 'f', code: 'KeyF', ctrlKey: true, shiftKey: true,
+                    bubbles: true, cancelable: true
+                }));
+            } catch (e) { /* 무시 */ }
+            if (++tries < 4) setTimeout(step, 220);
+        })();
         return true;
     }
+
+    function apply(on) {
+        return on ? turnOn() : turnOff();
+    }
+
+    function reportMode() {
+        var on = mounted() ? modeOn() : null;
+        if (on === null) {                       // 툴바가 없다 - 알릴 것도 걸 것도 없다
+            lastMode = null;
+            wantMode = null;
+            return;
+        }
+        /* ★프로그램이 걸어 달라고 한 값과 다르면, 그것은 '알릴 일' 이 아니라 '다시 걸
+         *   일' 이다. 여기서 반대로 알려 버리면 - 예컨대 페이지가 Esc 를 가로채서 이
+         *   프레임만 안 꺼졌을 때 - 그 보고가 탭 전체를 도로 켠다(끄려는데 다시 켜지는
+         *   진동). 몇 번 더 해 보고, 그래도 안 되면 그때는 사실대로 알린다:
+         *   한쪽이 안 꺼진 채로 남는 것이, 전체가 제멋대로 켜지는 것보다 낫다. */
+        if (wantMode !== null && on !== wantMode) {
+            /* ★메모를 쓰는 중이면 다투지 않는다. 다시 걸지도, 반대로 알리지도 않는다 -
+             *   글을 저장하거나 취소하는 순간 아래 재시도가 이어서 맞춘다. */
+            if (popupBusy()) return;
+            if (Date.now() < muteUntil) return;
+            if (wantTries < 3) {
+                wantTries++;
+                muteUntil = Date.now() + 900;
+                apply(wantMode);
+                return;
+            }
+            /* ★포기하더라도 '내가 바꿨다' 로 알리지 않는다. 그렇게 알리면 프로그램이
+             *   그 값을 탭의 기준으로 삼아 나머지 문서까지 따라 바꾼다 - 두 문서가
+             *   서로 자기 상태를 주장하며 번갈아 뒤집혔다(실측: [꺼짐,켜짐] 에서
+             *   off→on 보고가 오가며 영영 안 맞았다).
+             *   대신 '참고 보고' 로 알린다 - 프로그램이 기억한 값으로 다시 걸어 준다. */
+            wantMode = null;
+            lastMode = on;
+            lastBeat = Date.now();
+            push('mode', on ? 'sync-on' : 'sync-off', []);
+            if (window.console) {
+                console.info('[화면주석] 이 문서의 모드를 요청대로 바꾸지 못했습니다 - 다시 시도합니다.');
+            }
+            return;
+        }
+        if (on === wantMode) wantMode = null;    // 맞춰졌다
+        if (on === lastMode) {
+            /* ★변한 게 없어도 5초에 한 번은 상태를 알린다. 어떤 이유로든 두 문서가
+             *   어긋나면(한쪽만 켜진 채로 남으면) 사람에게는 "한쪽만 잡힌다" 로 보이는데,
+             *   변화가 없으면 아무도 그 사실을 모른다. 프로그램이 이 보고를 받아
+             *   탭이 기억하는 값으로 되돌린다. */
+            if (Date.now() - lastBeat > 5000 && Date.now() >= muteUntil) {
+                lastBeat = Date.now();
+                push('mode', on ? 'sync-on' : 'sync-off', []);
+            }
+            return;
+        }
+        lastBeat = Date.now();
+        /* ★프로그램이 맞춰 주는 동안에는 '판단' 자체를 미룬다. 여기서 lastMode 를
+         *   적어 버리면 그 사이에 사람이 실제로 끈 것까지 삼켜, 한쪽만 꺼진 채로
+         *   남는다(실측: 최상위는 꺼졌는데 iframe 은 켜진 채였다). */
+        if (Date.now() < muteUntil) return;
+        var first = (lastMode === null);
+        lastMode = on;
+        /* 방금 툴바가 붙었으면 "이 탭이 지금 주석 모드인가" 를 프로그램에 묻는다.
+         * 셸이 iframe 을 갈아끼우면 새 문서는 항상 꺼진 채로 시작하기 때문이다. */
+        push('mode', first ? 'ask' : (on ? 'on' : 'off'), []);
+    }
+
+    /* 프로그램이 같은 탭의 다른 문서에 모드를 맞춰 줄 때 부른다. */
+    window.__qaSetMode = function (on) {
+        on = !!on;
+        if (!isMine() || !mounted()) return false;
+        lastMode = on;                          // ★먼저 적는다 - 되받아 다시 알리지 않게
+        muteUntil = Date.now() + 900;   // 켜기 재시도(320ms)와 렌더까지만 덮는다
+        wantTries = 0;
+        if (modeOn() === on) {
+            wantMode = null;
+            return true;
+        }
+        wantMode = on;                          // 안 걸리면 reportMode 가 다시 시도한다
+        return apply(on);
+    };
 
     window.__qaRemount = function () {
         try {
@@ -839,12 +1258,17 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
                 var k = localStorage.key(i);
                 if (k && k.indexOf('feedback-annotations-') === 0) kill.push(k);
                 else if (k && k.indexOf('agentation-rearrange-') === 0) kill.push(k);
+                // ★design(레이아웃의 배치 상자)도 함께 지운다 - 이걸 빼먹으면
+                //   [비우기]/[추출] 뒤에도 배치 상자가 브라우저에 남아 다음 회차의
+                //   레이아웃 변경 개수에 섞인다.
+                else if (k && k.indexOf('agentation-design-') === 0) kill.push(k);
             }
             for (var j = 0; j < kill.length; j++) {
                 localStorage.removeItem(kill[j]);
                 removed++;
             }
         } catch (e) { /* 저장소 접근 불가 - 무시 */ }
+        lastLayoutSig = 'null';        // 지웠으니 다음 tick 은 '변화 없음' 부터 다시 본다
         try {
             if (mounted()) {
                 unmount();
@@ -854,14 +1278,152 @@ import { Agentation } from '../vendor/agentation.ko.mjs';
         return removed;
     };
 
+    /* ── 브8: 메모창에 그림을 붙인다 ─────────────────────────────
+     * ★도구가 스크린샷을 찍지 않는다(README) - 사람이 무엇을 얼마나 보여줄지
+     *   직접 잘라 오는 것만 붙는다(Win+Shift+S 후 Ctrl+V, 또는 파일을 끌어다 놓기).
+     *   메모를 쓰는 자리에서 바로 끝나야 하므로 프로그램 창으로 옮겨 갈 필요가
+     *   없다. 저장은 기존 push 통로를 그대로 쓴다(네트워크를 타지 않는다). */
+    var attachMap = (typeof WeakMap !== 'undefined') ? new WeakMap() : null;
+    var ATTACH_ROW_ID = '__qa_attach_row';
+    var MAX_IMAGES = 5, MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+
+    // ★openPopup() 은 Esc 가드용(안 보이면 null) - 여기서는 손대지 않는다.
+    //   제출 순간 팝업이 사라지는 애니메이션(opacity 감소) 중일 수 있어 그 엄격한
+    //   기준을 쓰면 방금 붙인 그림을 놓친다. DOM 에 있으면 그대로 믿는다.
+    function anyPopupNode() {
+        try { return document.querySelector('[data-annotation-popup]'); }
+        catch (e) { return null; }
+    }
+
+    function popupImages(pop) {
+        if (!attachMap || !pop) return [];
+        return attachMap.get(pop) || [];
+    }
+
+    function setPopupImages(pop, list) {
+        if (attachMap && pop) attachMap.set(pop, list);
+    }
+
+    function renderAttachRow(pop) {
+        try {
+            var list = popupImages(pop);
+            var row = pop.querySelector('#' + ATTACH_ROW_ID);
+            if (!list.length) {
+                if (row && row.parentNode) row.parentNode.removeChild(row);
+                return;
+            }
+            if (!row) {
+                row = document.createElement('div');
+                row.id = ATTACH_ROW_ID;
+                row.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin:6px 0;' +
+                    'align-items:center;';
+                var ta = pop.querySelector('textarea');
+                if (ta && ta.parentNode) ta.parentNode.insertBefore(row, ta.nextSibling);
+                else pop.appendChild(row);
+            }
+            row.innerHTML = '';
+            var label = document.createElement('div');
+            label.style.cssText = 'font:11px system-ui,sans-serif;' +
+                'color:rgba(255,255,255,.7);width:100%;';
+            label.textContent = '그림 ' + list.length + '장 - 확정하면 함께 저장됩니다';
+            row.appendChild(label);
+            list.forEach(function (img, i) {
+                var wrap = document.createElement('div');
+                wrap.style.cssText = 'position:relative;width:48px;height:48px;flex:none;';
+                var im = document.createElement('img');
+                im.src = img.data;
+                im.style.cssText = 'width:48px;height:48px;object-fit:cover;' +
+                    'border-radius:4px;display:block;';
+                wrap.appendChild(im);
+                var x = document.createElement('button');
+                x.type = 'button';
+                x.textContent = '×';
+                x.title = '빼기';
+                x.style.cssText = 'position:absolute;top:-6px;right:-6px;width:16px;' +
+                    'height:16px;border-radius:50%;border:0;background:#c0392b;color:#fff;' +
+                    'font:11px/16px sans-serif;cursor:pointer;padding:0;';
+                x.addEventListener('click', function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    var l2 = popupImages(pop).slice();
+                    l2.splice(i, 1);
+                    setPopupImages(pop, l2);
+                    renderAttachRow(pop);
+                });
+                wrap.appendChild(x);
+                row.appendChild(wrap);
+            });
+        } catch (e) { /* 그림 한 줄 때문에 도구가 서면 안 된다 */ }
+    }
+
+    function addPopupImage(pop, file) {
+        if (!file || !pop || file.type.indexOf('image/') !== 0) return;
+        var list = popupImages(pop);
+        if (list.length >= MAX_IMAGES || file.size > MAX_IMAGE_BYTES) return;
+        var reader = new FileReader();
+        reader.onload = function () {
+            var l2 = popupImages(pop).slice();
+            l2.push({ mime: file.type, data: String(reader.result || '') });
+            setPopupImages(pop, l2);
+            renderAttachRow(pop);
+        };
+        try { reader.readAsDataURL(file); } catch (e) { /* 무시 */ }
+    }
+
+    function imageFilesOf(list) {
+        var out = [];
+        for (var i = 0; list && i < list.length; i++) {
+            if (list[i] && list[i].type && list[i].type.indexOf('image/') === 0) {
+                out.push(list[i]);
+            }
+        }
+        return out;
+    }
+
+    function watchAttach() {
+        // 글자를 붙여넣을 때는 손대지 않는다 - 그림 파일이 있을 때만 가로챈다.
+        document.addEventListener('paste', function (e) {
+            var pop = anyPopupNode();
+            if (!pop || !pop.contains(e.target)) return;
+            var imgs = imageFilesOf(e.clipboardData && e.clipboardData.files);
+            if (!imgs.length) return;
+            e.preventDefault();
+            imgs.forEach(function (f) { addPopupImage(pop, f); });
+        }, true);
+
+        document.addEventListener('dragover', function (e) {
+            var pop = anyPopupNode();
+            if (pop && pop.contains(e.target)) e.preventDefault();   // 드롭을 허용한다
+        }, true);
+
+        document.addEventListener('drop', function (e) {
+            var pop = anyPopupNode();
+            if (!pop || !pop.contains(e.target)) return;
+            var imgs = imageFilesOf(e.dataTransfer && e.dataTransfer.files);
+            if (!imgs.length) return;
+            e.preventDefault();
+            imgs.forEach(function (f) { addPopupImage(pop, f); });
+        }, true);
+    }
+
+    // 확정(add/update) 할 때 그 팝업에 쌓여 있던 그림을 함께 보낸다.
+    function imagesToSend() {
+        var pop = anyPopupNode();
+        var imgs = pop ? popupImages(pop) : [];
+        return imgs.length ? imgs : null;
+    }
+
     function start() {
         mount();
+        lastUrl = location.href;
         announce();
         watchFrames();
+        every(reportMode, 250);         // 모드가 바뀌면 같은 탭의 다른 문서에도 맞춘다
         watchTop();
         guardEsc();
         guardClicks();
         watchPopup();
+        watchAttach();                  // 브8: 메모창에 붙인 그림
         window.addEventListener('resize', onResize);
     }
 
