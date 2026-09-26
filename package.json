@@ -1,0 +1,13 @@
+{
+  "name": "qa-annotator",
+  "private": true,
+  "version": "1.0.0",
+  "description": "화면 주석 QA - 주입 스크립트 빌드용. 이 폴더는 특정 프로젝트에 속하지 않는다(어떤 도메인에서나 쓰는 범용 도구). node/esbuild 는 빌드에만 필요하고 배포 exe 에는 불필요.",
+  "type": "module",
+  "dependencies": {
+    "agentation": "^3.0.2",
+    "esbuild": "^0.28.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}

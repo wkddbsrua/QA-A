@@ -1,0 +1,642 @@
+# -*- coding: utf-8 -*-
+"""화면 주석 QA - 프로그램 창.
+
+쓰는 법은 두 단계다.
+  1. 주소를 붙여넣고 [QA 시작]  → 브라우저가 열린다
+  2. 화면을 클릭해 메모를 남긴다 → 이 창에 화면별로 쌓인다. 끝나면 [클립보드 복사]
+
+브라우저에 설치하는 것은 없다(북마크·확장·인증서 없음). 페이지를 옮겨도
+그 화면에서 다시 누를 것이 없다. 어떤 도메인에서나 그대로 동작한다.
+"""
+import ctypes
+import io
+import json
+import os
+import queue
+import subprocess
+import sys
+import threading
+import traceback
+from datetime import datetime
+
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+import launcher as L
+from store import Store
+
+APP_NAME = '화면 주석 QA'
+RES = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+
+
+def pick_home():
+    """쓸 수 있는 저장 위치를 고른다. PC 마다 폴더 위치가 다르다는 것을 전제한다.
+
+    ★exe 옆에는 절대 쓰지 않는다 - USB·읽기전용 공유·다운로드 폴더에서 실행될 수 있다.
+      %LOCALAPPDATA% 가 없거나(드문 구성) 로밍/네트워크로 리다이렉트돼 쓸 수 없는 PC 도
+      있으므로, 실제로 파일을 써 보고 되는 곳을 고른다. 첫 후보가 되면 거기서 끝난다."""
+    seen = []
+    for base in (os.environ.get('LOCALAPPDATA'), os.environ.get('APPDATA'),
+                 os.environ.get('TEMP'), os.path.expanduser('~')):
+        if not base or base in seen:
+            continue
+        seen.append(base)
+        cand = os.path.join(base, 'qa-annotator')
+        try:
+            if not os.path.isdir(cand):
+                os.makedirs(cand)
+            probe = os.path.join(cand, '.write-test')
+            with open(probe, 'w', encoding='utf-8') as f:
+                f.write('ok')
+            os.remove(probe)
+            return cand
+        except Exception:
+            continue
+    # 마지막 수단: 현재 작업 폴더(여기도 안 되면 어차피 아무것도 못 한다)
+    return os.path.join(os.getcwd(), 'qa-annotator')
+
+
+HOME = pick_home()
+OUT_DIR = os.path.join(HOME, 'out')
+PROFILE_DIR = os.path.join(HOME, 'profile')
+SETTINGS = os.path.join(HOME, 'settings.json')
+SESSION = os.path.join(HOME, 'session.json')
+INJECT_JS = os.path.join(RES, 'dist', 'inject.js')
+HELP_HTML = os.path.join(RES, 'docs', '사용법.html')
+
+INK = '#111111'
+MUTED = '#707070'
+LINE = '#e0e0e0'
+RED = '#e1251b'
+
+
+def ensure_home():
+    for d in (HOME, OUT_DIR):
+        if not os.path.isdir(d):
+            os.makedirs(d)
+
+
+def enable_dpi_awareness():
+    """고해상도·배율 화면에서 창이 흐릿하게 확대되지 않게 한다.
+
+    tkinter 는 기본적으로 DPI 를 모른다. 이 PC 가 100% 라도 다른 PC 는 125·150·200%
+    가 흔하고(고해상도 노트북·4K), 그 화면에서는 창 전체가 비트맵 확대되어 뭉개진다.
+    반드시 창을 만들기 전에 불러야 한다."""
+    if os.name != 'nt':
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)      # PROCESS_SYSTEM_DPI_AWARE
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()           # 구형 윈도우 폴백
+    except Exception:
+        pass
+
+
+_MUTEX = None
+
+
+def acquire_single_instance():
+    """이 프로그램은 한 번에 하나만 돈다. 이미 돌고 있으면 False.
+
+    ★여러 개가 동시에 뜨면 각자 브라우저에 주입을 등록하고 같은 결과 파일에 쓴다
+      → 툴바가 겹치고 목록이 뒤섞인다(실측: 사용자 PC 에 4개가 떠 있었다).
+      사람들은 아이콘을 여러 번 누른다는 것을 전제로 막아야 한다."""
+    global _MUTEX
+    if os.name != 'nt':
+        return True
+    ERROR_ALREADY_EXISTS = 183
+    try:
+        k = ctypes.windll.kernel32
+        _MUTEX = k.CreateMutexW(None, False, 'Local\\qa-annotator-single')
+        return k.GetLastError() != ERROR_ALREADY_EXISTS
+    except Exception:
+        return True                     # 잠금을 못 걸면 막지 않는다(기능이 우선)
+
+
+def focus_existing_window():
+    """이미 떠 있는 창을 앞으로 가져온다 - "이미 실행 중" 이라는 말만 하면 불친절하다."""
+    if os.name != 'nt':
+        return False
+    try:
+        u = ctypes.windll.user32
+        hwnd = u.FindWindowW(None, APP_NAME)
+        if not hwnd:
+            return False
+        u.ShowWindow(hwnd, 9)           # SW_RESTORE
+        u.SetForegroundWindow(hwnd)
+        return True
+    except Exception:
+        return False
+
+
+def set_clipboard(text):
+    """윈도우 클립보드에 직접 쓴다. 성공하면 True.
+
+    ★tkinter 의 clipboard_append 는 Tk 가 클립보드를 '소유' 하는 방식이라
+      프로그램을 닫으면 내용이 사라진다(실측: 종료 후 붙여넣기 = 빈 값).
+      QA 는 복사한 뒤 프로그램을 닫고 붙여넣는다 - 그러면 다 잃는다."""
+    if os.name != 'nt':
+        return False
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE = 0x0002
+    try:
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        buf = ctypes.create_unicode_buffer(text)
+        size = ctypes.sizeof(buf)
+        if not u32.OpenClipboard(None):
+            return False
+        try:
+            u32.EmptyClipboard()
+            k32.GlobalAlloc.restype = ctypes.c_void_p
+            h = k32.GlobalAlloc(GMEM_MOVEABLE, size)
+            if not h:
+                return False
+            k32.GlobalLock.restype = ctypes.c_void_p
+            k32.GlobalLock.argtypes = [ctypes.c_void_p]
+            dst = k32.GlobalLock(h)
+            if not dst:
+                return False
+            ctypes.memmove(dst, buf, size)
+            k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+            k32.GlobalUnlock(h)
+            u32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+            if not u32.SetClipboardData(CF_UNICODETEXT, h):
+                return False
+            return True
+        finally:
+            u32.CloseClipboard()
+    except Exception:
+        return False
+
+
+def pick_font(root, candidates, fallback='TkDefaultFont'):
+    """설치된 것 중 첫 번째를 고른다. 한국어 Windows 가 아닌 PC 에는 맑은 고딕이 없다."""
+    try:
+        from tkinter import font as tkfont
+        have = set(tkfont.families(root))
+    except Exception:
+        return fallback
+    for c in candidates:
+        if c in have:
+            return c
+    return fallback
+
+
+class App(tk.Tk):
+    def __init__(self):
+        tk.Tk.__init__(self)
+        ensure_home()
+        self.title(APP_NAME)
+        self.configure(bg='#ffffff')
+
+        # 이 PC 기준으로 크기를 박지 않는다 - 실제 화면에 맞춰 잡고 가운데 놓는다.
+        self.ui_font = pick_font(self, ['맑은 고딕', 'Malgun Gothic', 'Segoe UI', 'Noto Sans KR'])
+        self.mono_font = pick_font(self, ['Consolas', 'D2Coding', 'Courier New'])
+        self._fit_window(980, 660, 820, 520)
+
+        self.store = Store(OUT_DIR)
+        self.launcher = None
+        self._starting = False      # [QA 시작] 연타로 브라우저가 두 번 뜨지 않게
+        self.settings = self.load_settings()
+        # ★작업 스레드는 tkinter 를 직접 만지지 않는다.
+        #   after() 조차 다른 스레드에서 부르면 "main thread is not in main loop" 로
+        #   죽는다(실측 - 이 때문에 [QA 시작] 이 실패했다). 메시지만 큐에 넣고
+        #   그리는 일은 메인 스레드의 _drain() 이 한다.
+        self._msgq = queue.Queue()
+
+        # 기본값을 박아 두지 않는다 - 어떤 프로젝트에서든 그대로 쓰려면 빈 칸이어야 한다.
+        self.target_url = tk.StringVar(value=self.settings.get('last_url', ''))
+        self.status_text = tk.StringVar(value='대기')
+        self.count_text = tk.StringVar(value='화면 0개 · 주석 0건')
+
+        self._style()
+        self._head()
+        self._bar()
+        self._list()
+        self._log()
+        self._foot()
+
+        self._drain()
+        pages, total = self.store.replay()
+        if total:
+            self.log('지난 기록을 복원했습니다 - 화면 %d개 · 주석 %d건' % (pages, total))
+        self.refresh()
+
+        problems = L.preflight()
+        if problems:
+            self.set_status(False, '점검 필요')
+            for p in problems:
+                self.log(p.replace('\n', ' '))
+            messagebox.showwarning('시작하기 전에', '\n\n'.join(problems))
+        else:
+            name, _exe = L.find_browser()
+            self.log('%s 를 사용합니다. 주소를 넣고 [QA 시작] 을 누르세요.' % name)
+
+        self.protocol('WM_DELETE_WINDOW', self.on_close)
+
+        # 실행 인자로 주소를 주면 그대로 시작한다(바로가기·명령줄용, 그리고 빌드 검증용).
+        #   화면주석-QA.exe https://example.com/…
+        if len(sys.argv) > 1 and sys.argv[1].strip() and not problems:
+            self.target_url.set(sys.argv[1].strip())
+            self.after(400, self.start_qa)
+
+    def _fit_window(self, want_w, want_h, min_w, min_h):
+        """원하는 크기를 화면 안으로 접어 넣는다(작업표시줄 여유 포함) + 가운데 정렬."""
+        try:
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+        except Exception:
+            sw, sh = want_w, want_h
+        w = max(min(want_w, sw - 80), min(min_w, sw - 20))
+        h = max(min(want_h, sh - 140), min(min_h, sh - 40))
+        x = max((sw - w) // 2, 0)
+        y = max((sh - h) // 3, 0)
+        self.geometry('%dx%d+%d+%d' % (w, h, x, y))
+        self.minsize(min(min_w, w), min(min_h, h))
+
+    # ── 설정 ──────────────────────────────────────────────────
+    def load_settings(self):
+        try:
+            with io.open(SETTINGS, encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def save_settings(self):
+        try:
+            self.settings['last_url'] = self.target_url.get().strip()
+            with io.open(SETTINGS, 'w', encoding='utf-8') as f:
+                f.write(json.dumps(self.settings, ensure_ascii=False, indent=2))
+        except Exception:
+            pass
+
+    # ── 화면 구성 ──────────────────────────────────────────────
+    def _style(self):
+        st = ttk.Style(self)
+        try:
+            st.theme_use('clam')
+        except Exception:
+            pass
+        f = self.ui_font
+        st.configure('.', background='#ffffff', foreground=INK, font=(f, 10))
+        st.configure('H1.TLabel', font=(f, 15, 'bold'))
+        st.configure('Muted.TLabel', foreground=MUTED, font=(f, 9))
+        st.configure('TButton', padding=(12, 6))
+        st.configure('Go.TButton', padding=(18, 7), font=(f, 10, 'bold'))
+        st.configure('Treeview', rowheight=24, fieldbackground='#ffffff')
+        st.configure('Treeview.Heading', font=(f, 9, 'bold'))
+
+    def _head(self):
+        head = ttk.Frame(self, padding=(18, 16, 18, 4))
+        head.pack(fill='x')
+        ttk.Label(head, text=APP_NAME, style='H1.TLabel').pack(side='left')
+        ttk.Label(head, text='  화면을 클릭해 남긴 지적을 셀렉터·좌표가 붙은 데이터로 넘긴다',
+                  style='Muted.TLabel').pack(side='left', pady=(5, 0))
+        self.badge = tk.Label(head, textvariable=self.status_text, bg='#e6e6e6', fg='#555555',
+                              font=(self.ui_font, 9, 'bold'), padx=10, pady=3)
+        self.badge.pack(side='right')
+        ttk.Button(head, text='사용법', command=self.open_help).pack(side='right', padx=(0, 10))
+
+    def _bar(self):
+        wrap = ttk.Frame(self, padding=(18, 6, 18, 8))
+        wrap.pack(fill='x')
+        card = tk.Frame(wrap, bg='#ffffff', highlightbackground=LINE, highlightthickness=1)
+        card.pack(fill='x')
+
+        r1 = tk.Frame(card, bg='#ffffff')
+        r1.pack(fill='x', padx=12, pady=(12, 6))
+        tk.Label(r1, text='테스트할 주소', bg='#ffffff', fg=INK,
+                 font=(self.ui_font, 10, 'bold')).pack(side='left')
+        e = tk.Entry(r1, textvariable=self.target_url, font=(self.ui_font, 11),
+                     relief='solid', bd=1)
+        e.pack(side='left', fill='x', expand=True, padx=10)
+        e.bind('<Return>', lambda _e: self.start_qa())
+        ttk.Button(r1, text='QA 시작', style='Go.TButton', command=self.start_qa).pack(side='left')
+
+        r2 = tk.Frame(card, bg='#ffffff')
+        r2.pack(fill='x', padx=12, pady=(0, 12))
+        tk.Label(r2, bg='#ffffff', fg=MUTED, font=(self.ui_font, 9), justify='left',
+                 text='브라우저에 설치하는 것은 없습니다. 열린 창에서 주소를 바꿔 돌아다녀도 '
+                      '화면마다 툴바가 자동으로 뜹니다.\n'
+                      '전용 프로필이라 처음 한 번만 로그인하면 그다음부터 유지됩니다.'
+                 ).pack(side='left')
+
+    def _list(self):
+        wrap = ttk.Frame(self, padding=(18, 0, 18, 8))
+        wrap.pack(fill='both', expand=True)
+
+        bar = ttk.Frame(wrap)
+        bar.pack(fill='x', pady=(0, 6))
+        ttk.Label(bar, textvariable=self.count_text).pack(side='left')
+        ttk.Button(bar, text='결과 폴더', command=lambda: self.open_path(OUT_DIR)).pack(side='right')
+        ttk.Button(bar, text='비우기 (보관)', command=self.do_reset).pack(side='right', padx=(0, 8))
+        ttk.Button(bar, text='추출 (저장 후 삭제)', command=self.do_export).pack(side='right', padx=(0, 8))
+        ttk.Button(bar, text='클립보드 복사', command=self.do_copy).pack(side='right', padx=(0, 8))
+
+        cols = ('no', 'title', 'vp', 'url', 'ann', 'con', 'net')
+        self.tree = ttk.Treeview(wrap, columns=cols, show='headings', height=11)
+        # 해상도는 화면 정체성의 일부다(같은 주소라도 해상도가 다르면 다른 줄).
+        for key, label, width, anchor in (
+                ('no', '화면', 44, 'center'), ('title', '제목', 190, 'w'),
+                ('vp', '해상도', 92, 'center'), ('url', '주소', 360, 'w'),
+                ('ann', '주석', 52, 'center'),
+                ('con', '콘솔에러', 66, 'center'), ('net', '실패요청', 66, 'center')):
+            self.tree.heading(key, text=label)
+            self.tree.column(key, width=width, anchor=anchor)
+        self.tree.pack(side='left', fill='both', expand=True)
+        sb = ttk.Scrollbar(wrap, orient='vertical', command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        sb.pack(side='right', fill='y')
+
+    def _log(self):
+        wrap = ttk.Frame(self, padding=(18, 0, 18, 6))
+        wrap.pack(fill='x')
+        ttk.Label(wrap, text='진행 상황', style='Muted.TLabel').pack(anchor='w')
+        self.logbox = tk.Text(wrap, height=6, font=(self.mono_font, 9), bg='#1e2433',
+                              fg='#d7dbe3', relief='flat', wrap='word')
+        self.logbox.pack(fill='x')
+        self.logbox.configure(state='disabled')
+
+    def _foot(self):
+        foot = ttk.Frame(self, padding=(18, 0, 18, 12))
+        foot.pack(fill='x')
+        ttk.Label(foot, text='QA 전용 · 어떤 도메인에서나 사용 · 사이트에 아무것도 설치하지 않는다',
+                  style='Muted.TLabel').pack(side='left')
+        ttk.Label(foot, text=HOME, style='Muted.TLabel').pack(side='right')
+
+    # ── 로그 · 상태 (스레드 안전) ───────────────────────────────
+    def log(self, msg):
+        """어느 스레드에서 불러도 안전하다 - 큐에만 넣는다."""
+        self._msgq.put(('log', msg))
+
+    def _drain(self):
+        """메인 스레드에서만 돈다. 큐에 쌓인 것을 실제로 그린다."""
+        try:
+            while True:
+                kind, payload = self._msgq.get_nowait()
+                if kind == 'log':
+                    self._write_log(payload)
+                elif kind == 'status':
+                    self.set_status(payload[0], payload[1])
+                elif kind == 'dialog':
+                    box = {'error': messagebox.showerror,
+                           'warn': messagebox.showwarning,
+                           'info': messagebox.showinfo}.get(payload[0], messagebox.showinfo)
+                    box(payload[1], payload[2])
+        except queue.Empty:
+            pass
+        except Exception:
+            pass
+        self.after(150, self._drain)
+
+    def _write_log(self, msg):
+        self.logbox.configure(state='normal')
+        self.logbox.insert('end', '[%s] %s\n' % (datetime.now().strftime('%H:%M:%S'), msg))
+        self.logbox.see('end')
+        self.logbox.configure(state='disabled')
+
+    def post_status(self, ok, text):
+        self._msgq.put(('status', (ok, text)))
+
+    def post_dialog(self, kind, title, msg):
+        self._msgq.put(('dialog', (kind, title, msg)))
+
+    def set_status(self, ok, text):
+        self.status_text.set(text)
+        self.badge.configure(bg='#e8f5e9' if ok else '#f3f3f3',
+                             fg='#1b5e20' if ok else '#555555')
+
+    # ── 동작 ──────────────────────────────────────────────────
+    def start_qa(self):
+        if self._starting:
+            self.log('이미 시작하는 중입니다. 잠시만 기다려 주세요.')
+            return
+        url = self.target_url.get().strip()
+        self.save_settings()
+        if self.launcher and self.launcher.alive():
+            if url:
+                try:
+                    self.log('이동: %s' % self.launcher.navigate(url))
+                except Exception as e:
+                    messagebox.showerror('이동 실패', str(e))
+            else:
+                self.log('브라우저가 이미 열려 있습니다.')
+            return
+
+        if not os.path.exists(INJECT_JS):
+            messagebox.showerror('파일 없음',
+                                 '주입 스크립트가 없습니다:\n%s\n\n'
+                                 '개발 폴더라면 build_ko.py 와 esbuild 번들을 먼저 만들어야 합니다.'
+                                 % INJECT_JS)
+            return
+        with io.open(INJECT_JS, encoding='utf-8') as f:
+            inject = f.read()
+
+        self.set_status(False, '브라우저 실행 중')
+        self.launcher = L.Launcher(inject, self.store, PROFILE_DIR, log=self.log,
+                                   state_path=SESSION)
+        # 목록이 비어 있다면(= 이미 추출/비우기 했다면) 브라우저에 남은 지난 주석도 정리한다.
+        # 그러지 않으면 브라우저를 띄울 때마다 옛 마커가 다시 보인다.
+        self.launcher.clear_stale = (self.store.counts()[1] == 0)
+        self._starting = True
+
+        def run():
+            try:
+                self.launcher.start(url or None)
+            except Exception as e:
+                self.launcher = None
+                self._starting = False
+                self.log('실패: %s' % e)
+                self.post_dialog('error', '시작하지 못했습니다', str(e))
+                self.post_status(False, '실패')
+                return
+            self._starting = False
+            self._watch()
+        threading.Thread(target=run, daemon=True).start()
+
+    def _watch(self):
+        """주입 상태를 스스로 확인해 배지에 올린다(사람이 눈으로 "떴나?" 하지 않게).
+
+        CDP 호출은 응답을 기다리므로 메인 스레드에서 돌리면 창이 잠깐 멈춘다 → 여기서 돈다."""
+        import time as _t
+        while self.launcher and self.launcher.alive():
+            try:
+                n = self.launcher.check_injected()
+            except Exception:
+                n = 0
+            self.post_status(bool(n), '주입됨 (탭 %d)' % n if n else '주입 대기')
+            _t.sleep(3)
+
+    def refresh(self):
+        pages, total = self.store.counts()
+        self.count_text.set('화면 %d개 · 주석 %d건' % (pages, total))
+        rows = self.store.rows()
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+        for r in rows:
+            self.tree.insert('', 'end', values=r)
+        if self.launcher and not self.launcher.alive():
+            self.set_status(False, '브라우저 닫힘')
+            self.launcher = None
+        self.after(1000, self.refresh)
+
+    def do_copy(self):
+        pages, total = self.store.counts()
+        if not total:
+            messagebox.showinfo('내용 없음', '아직 주석이 없습니다.')
+            return
+        text = self.store.render()
+        if set_clipboard(text):
+            self.log('클립보드로 복사 - 화면 %d개 · 주석 %d건 (창을 닫아도 유지됩니다)'
+                     % (pages, total))
+        else:
+            # 네이티브가 실패하면 tk 로 폴백. 이 경우엔 창을 닫으면 사라진다.
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(text)
+                self.update()
+                self.log('클립보드 복사(폴백) - 붙여넣기 전에는 이 창을 닫지 마세요.')
+            except Exception as e:
+                messagebox.showerror('복사 실패', str(e))
+                return
+        messagebox.showinfo('복사했습니다',
+                            '화면 %d개 · 주석 %d건을 클립보드에 담았습니다.\n'
+                            '메일·메신저·이슈에 그대로 붙여넣으세요.' % (pages, total))
+
+    def do_export(self):
+        pages, total = self.store.counts()
+        if not total:
+            messagebox.showinfo('내용 없음', '아직 주석이 없습니다.')
+            return
+        default = '화면주석-%s.md' % datetime.now().strftime('%Y%m%d-%H%M')
+        path = filedialog.asksaveasfilename(
+            title='어디에 저장할까요?', initialfile=default,
+            defaultextension='.md', filetypes=[('마크다운', '*.md'), ('모든 파일', '*.*')])
+        if not path:
+            return
+        try:
+            self.store.export(path)
+        except Exception as e:
+            # 저장이 실패하면 목록을 지우지 않는다(잃는 것보다 중복이 낫다).
+            messagebox.showerror('저장 실패', '%s\n\n목록은 그대로 두었습니다.' % e)
+            return
+        n = self.clear_browser_side()
+        self.log('추출 완료 - %s (화면 %d개 · 주석 %d건). 목록을 비웠습니다%s.'
+                 % (path, pages, total, ' · 브라우저 이력 %d건도 비움' % n if n else ''))
+        messagebox.showinfo('저장했습니다', path)
+
+    def do_reset(self):
+        pages, total = self.store.counts()
+        if not total:
+            # ★목록이 비어 있어도 브라우저 쪽은 남아 있을 수 있다(agentation 자체 저장, 7일).
+            #   여기서 그냥 나가 버려서 "목록엔 없는데 브라우저엔 마커가 남는" 상태가 됐다.
+            self.store.reset()
+            n = self.clear_browser_side()
+            self.log('목록은 이미 비어 있었습니다%s.'
+                     % (' · 브라우저 이력 %d건 비움' % n if n else
+                        ' (브라우저가 열려 있으면 그쪽 이력도 함께 비웁니다)'))
+            return
+        if not messagebox.askyesno('비우기',
+                                   '화면 %d개 · 주석 %d건을 목록에서 비웁니다.\n'
+                                   '원본 기록은 결과 폴더의 archive 에 남습니다.\n\n계속할까요?'
+                                   % (pages, total)):
+            return
+        self.store.reset()
+        n = self.clear_browser_side()
+        self.log('목록을 비웠습니다(원본은 archive 에 보관)%s.'
+                 % (' · 브라우저 이력 %d건도 비움' % n if n else ''))
+
+    def clear_browser_side(self):
+        """브라우저(localStorage)에 남은 주석 이력도 함께 비운다.
+
+        이력이 두 곳에 있어서, 프로그램만 비우면 그 화면에 다시 갔을 때 하단 툴바에
+        옛 주석이 그대로 보인다. 사용자에게는 [비우기] 한 번이어야 한다."""
+        if not (self.launcher and self.launcher.alive() and self.launcher.cdp):
+            return 0
+        try:
+            return self.launcher.clear_browser_annotations()
+        except Exception:
+            return 0
+
+    def open_help(self):
+        """사용법 문서를 기본 브라우저로 연다.
+
+        exe 안(_MEIPASS)에 들어 있으므로 그대로는 열 수 없다. 쓸 수 있는 곳으로
+        한 번 꺼내 놓고 연다 - 다음부터는 그 파일을 그대로 쓴다."""
+        target = os.path.join(HOME, '사용법.html')
+        try:
+            if os.path.exists(HELP_HTML):
+                src = io.open(HELP_HTML, encoding='utf-8').read()
+                if (not os.path.exists(target)
+                        or io.open(target, encoding='utf-8').read() != src):
+                    io.open(target, 'w', encoding='utf-8').write(src)
+            if not os.path.exists(target):
+                messagebox.showinfo('사용법', '사용법 문서를 찾지 못했습니다.')
+                return
+            self.open_path(target)
+            self.log('사용법 문서를 열었습니다 - %s' % target)
+        except Exception as e:
+            messagebox.showerror('열 수 없습니다', str(e))
+
+    def open_path(self, path):
+        try:
+            if os.name == 'nt':
+                os.startfile(path)
+            else:
+                subprocess.Popen(['xdg-open', path])
+        except Exception as e:
+            messagebox.showerror('열 수 없습니다', str(e))
+
+    def on_close(self):
+        self.save_settings()
+        if self.launcher:
+            try:
+                self.launcher.stop()
+            except Exception:
+                pass
+        self.destroy()
+
+
+def main():
+    try:
+        enable_dpi_awareness()
+        if not acquire_single_instance():
+            focus_existing_window()
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showinfo(APP_NAME, '\n'.join([
+                '이미 실행 중입니다.',
+                '작업표시줄에 있는 기존 창을 쓰세요.',
+                '',
+                '(여러 개를 띄우면 브라우저 주입이 겹치고 목록이 섞입니다)',
+            ]))
+            return
+        App().mainloop()
+    except Exception:
+        # 다른 PC 에서 처음 돌릴 때 콘솔 없는 exe 라 예외가 조용히 사라진다.
+        # 그래서 파일로 남기고 사람이 읽을 문장을 띄운다.
+        ensure_home()
+        crash = os.path.join(HOME, 'crash.log')
+        try:                                # 무한히 커지지 않게 - 오래된 것은 버린다
+            if os.path.getsize(crash) > 512 * 1024:
+                os.remove(crash)
+        except Exception:
+            pass
+        with io.open(crash, 'a', encoding='utf-8') as f:
+            f.write('\n=== %s ===\n%s' % (datetime.now(), traceback.format_exc()))
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror('실행하지 못했습니다',
+                                 '오류 내용을 아래 파일에 적었습니다.\n\n%s' % crash)
+        except Exception:
+            pass
+        raise
+
+
+if __name__ == '__main__':
+    main()
