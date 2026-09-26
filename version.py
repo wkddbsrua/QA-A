@@ -11,7 +11,7 @@ VERSION 은 사람이 올린다(동작이 바뀔 때).  BUILD 는 build_exe.py �
 """
 
 VERSION = '1.2'
-BUILD = 10     # 0 = build_exe.py 를 거치지 않은 소스
+BUILD = 11     # 0 = build_exe.py 를 거치지 않은 소스
 
 
 def label():

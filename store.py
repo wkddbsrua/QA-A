@@ -1059,7 +1059,7 @@ class Store(object):
             return sum(len(v) for v in self.attach.values())
 
     def all_attachment_paths(self):
-        """(aid, 절대경로) 전체 목록 - 이슈에 올리기가 드롭할 파일들."""
+        """(aid, 절대경로) 전체 목록 - 추출(zip)·Jira 첨부로 갈 파일들."""
         with self.lock:
             out = []
             for aid, names in self.attach.items():

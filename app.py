@@ -21,7 +21,7 @@ import webbrowser
 from datetime import datetime
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import jira_api
 import launcher as L
@@ -1075,7 +1075,7 @@ class App(tk.Tk):
                        ).pack(side='right', padx=(0, 8))
 
     def resend_round(self, rid):
-        """지난 회차 문서를 다시 보낸다(복사·저장·이슈·Jira). 회차는 건드리지 않는다."""
+        """지난 회차 문서를 다시 보낸다(복사·저장·Jira). 회차는 건드리지 않는다."""
         view = self._round_view(rid)
         if view is None:
             return
@@ -1258,7 +1258,7 @@ class App(tk.Tk):
         tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
                  text='메모창에 Ctrl+V(또는 끌어다 놓기)로 붙인 그림이 여기 쌓입니다. [화면에서 잘라 붙이기]는\n'
                       '브라우저에서 영역을 드래그해 이 주석에 붙입니다. 동영상은 Win+Alt+R 로 녹화한 파일을\n'
-                      '[파일 추가]로 붙이세요. 클립보드 복사에는 따라가지 않습니다 - 추출(zip)·이슈·Jira 로만 갑니다.'
+                      '[파일 추가]로 붙이세요. 클립보드 복사에는 따라가지 않습니다 - 추출(zip)·Jira 로만 갑니다.'
                  ).pack(fill='x', **pad)
         abox = tk.Frame(win, bg='#ffffff')
         abox.pack(fill='x', pady=(2, 0), **pad)
@@ -1549,54 +1549,6 @@ class App(tk.Tk):
             return ([p for _aid, p in store.all_attachment_paths()]
                     + [p for _k, p in store.all_capture_paths()])
 
-        def to_issue():
-            """브라우저 세션으로 이슈 화면을 열고 댓글칸을 채운다. ★등록은 사람이 누른다(토큰 없는 사람용).
-            못 채워도 실패가 아니다: 클립보드에 담아 두고 붙여넣도록 안내한다."""
-            body = txt.get('1.0', 'end-1c')
-            url = simpledialog.askstring(
-                '이슈 주소',
-                '댓글을 남길 이슈 주소를 넣으세요.\n(등록은 열린 화면에서 직접 누르시면 됩니다)',
-                initialvalue=(self.settings.get('issue_url') or ''), parent=win) or ''
-            url = url.strip()
-            if not url:
-                return
-            self.settings['issue_url'] = url
-            self.save_settings()
-            set_clipboard(body)              # 자동 채움이 실패해도 붙여넣을 수 있게
-            if not (self.launcher and self.launcher.alive() and self.launcher.cdp):
-                messagebox.showinfo(
-                    '브라우저가 없습니다',
-                    '내용을 클립보드에 담았습니다.\n'
-                    '[QA 시작] 으로 브라우저를 열고 이슈 화면에서 붙여넣으세요.', parent=win)
-                return
-            files = files_to_send() or None
-            res = self.launcher.paste_into(url, body, files=files)
-            if res.get('filled'):
-                img_msg = ''
-                if files:
-                    img_msg = ('\n\n파일 %d개를 댓글에 넣었습니다.' % len(files)
-                               if res.get('images') else
-                               '\n\n파일은 자동으로 못 넣었습니다 - 첨부 폴더에서 직접 올려 주세요.')
-                    if not res.get('images'):
-                        self.open_path(store.attach_dir if os.path.isdir(store.attach_dir) else store.out_dir)
-                self.log('이슈 화면을 열고 댓글칸을 채웠습니다 - 확인한 뒤 [등록] 을 누르세요.')
-                messagebox.showinfo(
-                    '채워 넣었습니다',
-                    '브라우저에서 내용을 확인한 뒤 직접 [등록] 을 누르세요.\n\n'
-                    '자동으로 등록하지 않습니다.' + img_msg, parent=win)
-            elif res.get('navigated'):
-                self.log('이슈 화면을 열었습니다. 댓글칸에 붙여넣어 주세요(클립보드에 담아 두었습니다).')
-                messagebox.showinfo(
-                    '붙여넣어 주세요',
-                    '이슈 화면을 열었습니다.\n'
-                    '댓글칸을 누르고 Ctrl+V 로 붙여넣은 뒤 [등록] 을 누르세요.\n\n'
-                    '내용은 클립보드에 담아 두었습니다.', parent=win)
-            else:
-                messagebox.showinfo(
-                    '열지 못했습니다',
-                    '이슈 화면을 열지 못했습니다.\n'
-                    '내용은 클립보드에 담아 두었으니 직접 붙여넣어 주세요.', parent=win)
-
         def to_jira():
             self.send_to_jira(txt.get('1.0', 'end-1c'), files_to_send(), parent=win)
 
@@ -1608,9 +1560,8 @@ class App(tk.Tk):
                    command=confirm).pack(side='right', padx=(0, 8))
         if action_label != '복사':
             ttk.Button(bar, text='클립보드 복사', command=copy_now).pack(side='right', padx=(0, 8))
-        ttk.Button(bar, text='Jira 로 보내기 (토큰)', command=to_jira).pack(side='right', padx=(0, 8))
-        ttk.Button(bar, text='이슈에 올리기 (등록은 직접)',
-                   command=to_issue).pack(side='right', padx=(0, 8))
+        # 2026-09-14: 브라우저 붙여넣기 경로(이슈에 올리기 · 등록은 직접)는 뺐다 - 토큰 경로로 통일.
+        ttk.Button(bar, text='Jira 로 보내기', command=to_jira).pack(side='right', padx=(0, 8))
         if n_att or n_cap:
             bits = []
             if n_att:
@@ -2019,7 +1970,7 @@ class App(tk.Tk):
                       '★토큰은 발급 직후 한 번만 보이고 Atlassian 에서도 다시 볼 수 없습니다. 다른 PC 에서 쓰거나\n'
                       '   다시 설치할 때 필요하니 비밀번호 관리 도구 등 안전한 곳에 따로 적어 두세요(잃으면 새로 발급).\n'
                       '토큰은 이 PC 의 내 Windows 계정에서만 풀리게 암호화해 저장합니다(다른 PC 로 복사해도 못 씁니다).\n'
-                      '토큰이 없는 사람은 기존처럼 [이슈에 올리기 (등록은 직접)] 을 쓰면 됩니다.'
+                      'Jira 로 보내려면 이 토큰이 필요합니다(브라우저 붙여넣기 경로는 없습니다).'
                  ).pack(fill='x', padx=16)
         ttk.Button(win, text='토큰 발급 페이지 열기 (id.atlassian.com)',
                    command=lambda: webbrowser.open(jira_api.TOKEN_URL)).pack(anchor='w', padx=16, pady=(6, 2))
