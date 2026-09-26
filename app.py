@@ -1962,7 +1962,7 @@ class App(tk.Tk):
         win.configure(bg='#ffffff')
         win.transient(self)
         win.grab_set()
-        win.geometry('680x500')
+        win.geometry('680x530')
         tk.Label(win, bg='#ffffff', font=(f, 11, 'bold'), anchor='w',
                  text='Jira Cloud 에 내 계정으로 올리기 위한 설정').pack(fill='x', padx=16, pady=(14, 2))
         tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', justify='left',
@@ -1972,8 +1972,18 @@ class App(tk.Tk):
                       '토큰은 이 PC 의 내 Windows 계정에서만 풀리게 암호화해 저장합니다(다른 PC 로 복사해도 못 씁니다).\n'
                       'Jira 로 보내려면 이 토큰이 필요합니다(브라우저 붙여넣기 경로는 없습니다).'
                  ).pack(fill='x', padx=16)
+        def open_token_page():
+            # ★발급 페이지를 열기 직전에 한 번 더 - 토큰은 그 화면에서 딱 한 번만 보인다.
+            messagebox.showwarning(
+                '토큰은 한 번만 보입니다',
+                'Atlassian 은 토큰을 만든 직후 한 번만 보여 주고 다시는 보여 주지 않습니다.\n\n'
+                '① 만들어진 토큰을 [복사] 하고\n'
+                '② 이 창의 "API 토큰" 칸에 붙여 넣고\n'
+                '③ 메모장·비밀번호 관리 도구 등 안전한 곳에도 한 번 더 저장해 두세요.\n\n'
+                '잃으면 새로 만들어 다시 넣어야 합니다(옛 토큰은 지워도 됩니다).', parent=win)
+            webbrowser.open(jira_api.TOKEN_URL)
         ttk.Button(win, text='토큰 발급 페이지 열기 (id.atlassian.com)',
-                   command=lambda: webbrowser.open(jira_api.TOKEN_URL)).pack(anchor='w', padx=16, pady=(6, 2))
+                   command=open_token_page).pack(anchor='w', padx=16, pady=(6, 2))
         site = tk.StringVar(value=cfg.site)
         email = tk.StringVar(value=cfg.email)
         token = tk.StringVar(value='')
@@ -1992,6 +2002,9 @@ class App(tk.Tk):
         tok_state = {'file': '저장된 토큰 있음 (바꾸려면 새로 입력)', 'env': '환경변수 JIRA_API_TOKEN 사용 중',
                      'locked': '저장된 토큰을 이 계정에서 풀 수 없음 - 다시 입력', '': '토큰 없음'}[cfg.token_source]
         row('API 토큰', token, show='*')
+        tk.Label(win, bg='#ffffff', fg=RED, font=(f, 9, 'bold'), anchor='w',
+                 text='   ★1회성 - 발급 화면에서 복사해 여기 붙이고, 메모장 등 안전한 곳에도 저장해 두세요.'
+                 ).pack(fill='x', padx=16)
         tk.Label(win, bg='#ffffff', fg=MUTED, font=(f, 9), anchor='w', text='   ' + tok_state
                  ).pack(fill='x', padx=16)
         row('기본 프로젝트 키', proj)
