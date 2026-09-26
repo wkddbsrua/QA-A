@@ -28,7 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-DEFAULT_SITE = 'https://syworks.atlassian.net'
+DEFAULT_SITE = 'https://your-site.atlassian.net'
 # ★기본 이슈 유형. 사내 프로젝트는 거의 전부 '에픽·작업·자료·QA' 만 있고 'Bug' 는 없다(2026-09-14 실측).
 #   'Bug' 를 기본으로 두면 새 이슈 만들기가 첫 시도부터 실패한다.
 DEFAULT_ISSUE_TYPE = u'QA'
